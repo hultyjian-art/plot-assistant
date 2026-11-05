@@ -17,7 +17,7 @@
 酒馆助手脚本区里新建一个脚本，内容只填下面这一行：
 
 ```javascript
-import 'https://cdn.jsdelivr.net/gh/hultjyian-art/剧情推进助手@v1.0.0/dist/剧情推进助手1.0.js'
+import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.0/dist/plot-assistant-1.0.js'
 ```
 
 刷新酒馆，脚本会自己装上。
@@ -73,12 +73,12 @@ pnpm install
 pnpm build
 ```
 
-产物在 `dist/剧情推进助手/`。需要打包后手动复制成带版本号的文件名。
+产物在 `dist/plot-assistant/`。需要打包后手动复制成带版本号的文件名。
 
 目录结构：
 
 ```
-src/剧情推进助手/
+src/plot-assistant/
 ├─ index.ts          入口（声明显示名与按钮名，然后启动）
 └─ modules/          全部实现
    ├─ actions.ts     重刷流程（捕获 / 删层 / 发送）
