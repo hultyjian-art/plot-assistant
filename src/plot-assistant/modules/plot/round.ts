@@ -17,7 +17,7 @@ import { buildResumePlan } from './eng/resume';
 import { performReplacements } from './eng/prompt-build';
 import { runPlotRound, type PlotRoundMessage, type PlotRoundOutcome, type SettledResult, type TaskLogInfo, type TaskProgressInfo } from './eng/engine';
 import { normalizeRound, selectTasksForRound, type ScheduleReason } from './eng/schedule';
-import type { TagMap } from './eng/tags';
+import { buildTagMap, type TagMap } from './eng/tags';
 import type { PlotTask } from './eng/task-model';
 import type { StashWorking } from './stash-model';
 
@@ -141,6 +141,17 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
     previousPlot: deps.previousPlot ?? deps.replacements?.previousPlot,
   });
 
+  // ── 历史标签表：上一轮 `<plot>` 里的 `<标签>内容</标签>` ──
+  //
+  // `{{标签}}` 的兜底来源。不建这张表时，`resolveTag` 查不到就吐 `<标签></标签>`
+  // 空壳 —— 用户预设里「以下是上一轮的相关记录：{{basic_info}}{{plot_judge}}……」
+  // 发出去会是一串空标签，而且不报错（2026-11-05 修）。
+  //
+  // 上游在 `plot-task-engine.ts:474` 用 `buildPlotTagMapFromText_ACU(lastPlotContent, null)`
+  // 建同一张表；我们 `resolveTag` 的「先查阶段接力、查不到退历史」已经是上游那个优先级，
+  // 缺的只是把值喂进来。传 `null` = 不限定名单，把上一轮出现的标签全扫进来。
+  const historyTagMap = buildTagMap(String(deps.previousPlot ?? ''), null);
+
   const renderMessages = (task: PlotTask, relayTagMap?: TagMap): PlotRoundMessage[] => {
     const context: TaskRenderContext = {
       replacements: baseReplacements,
@@ -149,7 +160,7 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
       // 都被换成一对空标签 —— 模型拿不到世界书，还不报错（2026-11-01 修）。
       // 任务自己的世界书（`taskWorldbook`）优先，它和上游一样是任务级覆盖。
       worldbookContent: deps.taskWorldbook?.(task) ?? deps.worldbookContent,
-      historyTagMap: undefined,
+      historyTagMap,
       // 阶段接力：引擎每一步都会递进来「本阶段开始那一刻」的标签快照；
       // 没递（比如算提示词条数那一次）就退到续跑起点。
       relayTagMap: relayTagMap ?? resume.relayTagMap,

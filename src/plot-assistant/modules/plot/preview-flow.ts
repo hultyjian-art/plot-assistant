@@ -32,6 +32,7 @@ import { getPlotFromHistory } from './eng/history-plot';
 import { renderTaskMessages } from './eng/messages';
 import { buildRoundReplacements } from './eng/round-inputs';
 import { normalizeRound, selectTasksForRound } from './eng/schedule';
+import { buildTagMap } from './eng/tags';
 import { buildPlotWorldbookTexts } from './data/worldbook-hits';
 import { resolveChatStateStore } from './data/chat-vars';
 import { resolveChatKey } from './chat-key';
@@ -149,13 +150,18 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
 
   const enabled = config.tasks.filter((task) => task.enabled !== false);
   const selection = selectTasksForRound(enabled, round);
+  // ── 历史标签表：上一轮 `<plot>` 里的 `<标签>内容</标签>` ──
+  //
+  // 与真跑路径（`round.ts`）同一张表：`{{标签}}` 查不到就吐 `<标签></标签>` 空壳，
+  // 而且不报错。预览必须跟真跑对得上，否则用户照着预览放行，实际发出去却是空标签。
+  const historyTagMap = buildTagMap(String(previousPlot ?? ''), null);
   const tasks: PlotPreviewTask[] = [];
   for (const task of selection.due) {
     const messages: PlotRoundMessage[] = renderTaskMessages(task, {
       replacements,
       worldbookContent: worldbook.content,
       relayTagMap: null,
-      historyTagMap: null,
+      historyTagMap,
     });
     tasks.push({
       taskId: task.id,
