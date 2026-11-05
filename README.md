@@ -17,12 +17,12 @@
 酒馆助手脚本区里新建一个脚本，内容只填下面这一行：
 
 ```javascript
-import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.2/dist/plot-assistant-1.0.2.js'
+import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.2/dist/plot-assistant/index.js'
 ```
 
 刷新酒馆，脚本会自己装上。
 
-> 链接里的 `@v1.0.2` 是版本号。**更新时只改这个数字**（比如换成 `@v1.1.0`）就能拉到新版本，不用重新粘贴一长串代码。
+> 链接里的 `@v1.0.2` 是版本号。**更新时只改这个数字**（比如换成 `@v1.0.3`）就能拉到新版本，文件路径永远不变。
 
 ---
 
@@ -83,7 +83,7 @@ pnpm install
 pnpm build
 ```
 
-产物在 `dist/plot-assistant/`。需要打包后手动复制成带版本号的文件名。
+产物在 `dist/plot-assistant/index.js`。文件名固定不变，版本靠 git tag 区分。
 
 目录结构：
 
