@@ -19,6 +19,7 @@ import { findStoredPreset } from './data/preset-store';
 import { buildSummaryIndexText, readAcuTables } from './data/read-tables';
 import { buildPlotWorldbookTexts } from './data/worldbook-hits';
 import { importPresetConfig } from './eng/preset-import';
+import { pickSummaryIndexEntry } from './eng/data-format';
 import { buildHistoryDigest, pickHistoryMessages } from './eng/history';
 import { applyContextTagFilters } from './eng/context-tags';
 import { getPlotFromHistory } from './eng/history-plot';
@@ -305,15 +306,24 @@ export async function appendPlotBlock(
     .map((item) => String(item.message ?? ''))
     .join('\n');
 
-  // ── 表格：只喂 `$5`（`$9` 是世界书，不是表格） ──
-  const tableResult = readAcuTables();
-  const summaryIndex = buildSummaryIndexText({ tables: tableResult.tables });
-
-  // ── 世界书：`$1` 全量、`$9` 剔掉数据库生成条目 ──
+  // ── 世界书：`$1` 全量、`$9` 剔掉数据库生成条目、`$5` 的纪要索引 ──
+  //
+  // 顺序上必须先读世界书：`$5` 的第一档要问「世界书里有没有那条纪要索引条目」，
+  // 表格只是它的兜底。以前读世界书在算 `$5` 之后，于是第一档永远轮不到 —— 补回 ACU 的链。
   const { bookNames, entriesByBook } = await readWorldbookEntries({
     source: plotSettings.worldbookSource,
     books: plotSettings.worldbookBooks,
   });
+
+  // ── 表格：只喂 `$5` 的兜底（`$9` 是世界书，不是表格） ──
+  const tableResult = readAcuTables();
+  const summaryIndex = buildSummaryIndexText({
+    tables: tableResult.tables,
+    // ACU 的优先级：世界书纪要索引条目 > 纪要表 > 总体大纲表。
+    // 那个条目是 ACU 自己导出的成品文本，内容比两张表的拼接更完整。
+    worldbookContent: pickSummaryIndexEntry(entriesByBook as never, bookNames),
+  });
+
   const worldbook = buildPlotWorldbookTexts({
     bookNames,
     entriesByBook: entriesByBook as never,

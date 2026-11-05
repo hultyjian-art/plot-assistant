@@ -17,12 +17,12 @@
 酒馆助手脚本区里新建一个脚本，内容只填下面这一行：
 
 ```javascript
-import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.1/dist/plot-assistant-1.0.1.js'
+import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.2/dist/plot-assistant-1.0.2.js'
 ```
 
 刷新酒馆，脚本会自己装上。
 
-> 链接里的 `@v1.0.1` 是版本号。**更新时只改这个数字**（比如换成 `@v1.1.0`）就能拉到新版本，不用重新粘贴一长串代码。
+> 链接里的 `@v1.0.2` 是版本号。**更新时只改这个数字**（比如换成 `@v1.1.0`）就能拉到新版本，不用重新粘贴一长串代码。
 
 ---
 
@@ -70,8 +70,9 @@ import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.1/dist/plo
 
 | 版本 | 说明 |
 |---|---|
-| **v1.0.1** | **当前推荐。** 修复「上一轮的 `{{标签}}` 渲染成空壳」的问题。 |
-| v1.0.0 | 首次发布。这个版本里，模板中写 `{{basic_info}}` 这类跨轮标签会渲染成 `<basic_info></basic_info>` 空壳——不报错，但内容拿不到。**请用 v1.0.1。** |
+| **v1.0.2** | **当前推荐。** 补上 `$5`（总结纲要）的第三档：世界书里的「纪要索引」条目优先于表格。 |
+| v1.0.1 | 修复「上一轮的 `{{标签}}` 渲染成空壳」。 |
+| v1.0.0 | 首次发布。模板中写 `{{basic_info}}` 这类跨轮标签会渲染成空壳——**请不要用这个版本**。 |
 
 ---
 

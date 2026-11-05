@@ -24,7 +24,8 @@
 import type { RerushContext } from '../types';
 import { findStoredPreset } from './data/preset-store';
 import { describePresetProblem, readPlotPreset } from './data/acu-presets';
-import { buildSummaryIndexText } from './data/read-tables';
+import { buildSummaryIndexText, readAcuTables } from './data/read-tables';
+import { pickSummaryIndexEntry } from './eng/data-format';
 import { importPresetConfig } from './eng/preset-import';
 import type { PlotRoundMessage } from './eng/engine';
 import { buildHistoryDigest, pickHistoryMessages } from './eng/history';
@@ -38,7 +39,6 @@ import { resolveChatStateStore } from './data/chat-vars';
 import { resolveChatKey } from './chat-key';
 import { attachLandingsToChat } from './stash-model';
 import { readPresetPlaceholders } from './preset-edit';
-import { readAcuTables } from './data/read-tables';
 import { readWorldbookEntries } from './run-in-flow';
 
 /** 一条要发出去的 message（role 已归一化）。 */
@@ -117,13 +117,19 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
     .map((item) => String(item.message ?? ''))
     .join('\n');
 
-  const tableResult = readAcuTables();
-  const summaryIndex = buildSummaryIndexText({ tables: tableResult.tables });
-
+  // 世界书要先读：`$5` 的第一档要问「世界书里有没有那条纪要索引条目」，表格只是兜底。
+  // 顺序与真跑路径（`run-in-flow.ts`）一致，否则预览与实跑对不上。
   const { bookNames, entriesByBook } = await readWorldbookEntries({
     source: plotSettings.worldbookSource,
     books: plotSettings.worldbookBooks,
   });
+
+  const tableResult = readAcuTables();
+  const summaryIndex = buildSummaryIndexText({
+    tables: tableResult.tables,
+    worldbookContent: pickSummaryIndexEntry(entriesByBook as never, bookNames),
+  });
+
   const worldbook = buildPlotWorldbookTexts({
     bookNames,
     entriesByBook: entriesByBook as never,
