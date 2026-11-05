@@ -17,12 +17,12 @@
 酒馆助手脚本区里新建一个脚本，内容只填下面这一行：
 
 ```javascript
-import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.0/dist/plot-assistant-1.0.js'
+import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.1/dist/plot-assistant-1.0.1.js'
 ```
 
 刷新酒馆，脚本会自己装上。
 
-> 链接里的 `@v1.0.0` 是版本号。**更新时只改这个数字**（比如换成 `@v1.1.0`）就能拉到新版本，不用重新粘贴一长串代码。
+> 链接里的 `@v1.0.1` 是版本号。**更新时只改这个数字**（比如换成 `@v1.1.0`）就能拉到新版本，不用重新粘贴一长串代码。
 
 ---
 
@@ -63,6 +63,15 @@ import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.0/dist/plo
 **需要装「龙血玄黄·数据库」（ACU）脚本。**
 
 剧情推进要从数据库读世界书、表格、纪要索引这些内容。没装 ACU 的话，剧情推进这一块拿不到数据；只用手势重刷、捕获回填这些功能仍然可用。
+
+---
+
+## 版本
+
+| 版本 | 说明 |
+|---|---|
+| **v1.0.1** | **当前推荐。** 修复「上一轮的 `{{标签}}` 渲染成空壳」的问题。 |
+| v1.0.0 | 首次发布。这个版本里，模板中写 `{{basic_info}}` 这类跨轮标签会渲染成 `<basic_info></basic_info>` 空壳——不报错，但内容拿不到。**请用 v1.0.1。** |
 
 ---
 

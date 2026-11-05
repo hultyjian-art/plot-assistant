@@ -11,3 +11,7 @@ pnpm-debug.log*
 
 auto-imports.d.ts
 components.d.ts
+
+# 本机凭据/笔记，绝不进版本库
+远端令牌.md
+*.token

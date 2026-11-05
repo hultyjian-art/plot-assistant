@@ -1,6 +1,6 @@
 {
   "name": "plot-assistant",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "剧情推进助手 —— 酒馆助手脚本",
   "private": true,
   "scripts": {
