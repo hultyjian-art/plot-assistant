@@ -17,14 +17,14 @@
 import { extractTaskTags, type TagMap } from './tags';
 
 /** 单个标签的差量模式。 */
-export type TagDiffMode = 'off' | 'keep' | 'blocks';
+export type TagDiffMode = 'off' | 'keep' | 'blocks' | 'table';
 
 /** UI 下拉里的固定顺序。 */
-export const TAG_DIFF_MODES: readonly TagDiffMode[] = ['off', 'keep', 'blocks'];
+export const TAG_DIFF_MODES: readonly TagDiffMode[] = ['off', 'keep', 'blocks', 'table'];
 
 /** 脏值一律按「关闭」处理——宁可不省 token，也不要静默改写旧档案。 */
 export function normalizeTagDiffMode(value: unknown): TagDiffMode {
-  return value === 'keep' || value === 'blocks' ? value : 'off';
+  return value === 'keep' || value === 'blocks' || value === 'table' ? value : 'off';
 }
 
 /**
@@ -100,12 +100,17 @@ function previousContentOf(previousTags: TagMap | null | undefined, tagName: str
 interface ParsedBlock {
   /** 小节标题（`###` 后面的文字；旧格式的 `[名字]` 会去掉方括号） */
   title: string;
-  /** 标题行以下、状态行以外的正文 */
+  /** 标题行以下、指令行以外的正文 */
   body: string;
-  /** `【状态】` 里写的前台/后台；没写就是空 */
+  /**
+   * 兼容旧格式：`【状态】前台/后台`。
+   * 新格式使用 `【移入 标签名】` / `【移出】`，不再依赖「哪个标签算前台」。
+   */
   status: 'front' | 'back' | '';
-  /** 解析时这一块落在哪个嵌套标签里（如 character_archive） */
+  /** 这一块现在归属哪个嵌套标签；空串 = 外层（后台） */
   zone: string;
+  /** 补丁里是否用 `【移入】/【移出】` 明确改过归属 */
+  explicitZone: boolean;
   /** 稳定顺序：合并后保持原顺序 */
   order: number;
 }
@@ -186,6 +191,7 @@ function parseBlockDoc(text: string): ParsedBlockDoc {
         body: '',
         status: '',
         zone: currentZone,
+        explicitZone: false,
         order: blocks.length,
       };
       bodyLines = [];
@@ -193,6 +199,21 @@ function parseBlockDoc(text: string): ParsedBlockDoc {
     }
 
     if (current) {
+      // 新格式：显式把这一块移入某个标签（由 AI 自己写目标标签名，引擎不猜前台/后台）
+      const moveIn = /^【\s*移入\s*([^】]+?)\s*】\s*$/.exec(trimmed);
+      if (moveIn) {
+        current.zone = moveIn[1].trim();
+        current.explicitZone = true;
+        continue;
+      }
+      const moveOut = /^【\s*移出\s*】\s*$/.exec(trimmed);
+      if (moveOut) {
+        current.zone = '';
+        current.explicitZone = true;
+        continue;
+      }
+      // 兼容旧格式：没有「移入/移出」时，`【状态】` 仍然认；最终由旧文档里检测到的
+      // 前台标签名兜底，不写死任何具体标签。
       const status = /^【\s*状态\s*】\s*(.*)$/.exec(trimmed);
       if (status) {
         const value = status[1];
@@ -281,25 +302,45 @@ function findBlockKey(blocks: Map<string, ParsedBlock>, title: string): string |
   return null;
 }
 
-/** 把合并后的块重新排成「前台在 <frontTag> 里，后台在外面」的文本。 */
+/**
+ * 把合并后的块按「归属标签」重新排版：
+ * - 没写 `【移入】` 的块留在外层（后台）；
+ * - 写在 `【移入 character_archive】` 里的块放进对应的 `<character_archive>`；
+ * - 旧格式的 `【状态】前台` 只在能从上一轮检测到前台标签时兜底映射过去。
+ */
 function renderBlockDoc(blocks: readonly ParsedBlock[], frontTag: string): string {
   if (blocks.length === 0) return '';
-  const front: string[] = [];
-  const back: string[] = [];
+
+  const groups = new Map<string, string[]>();
+  const order: string[] = [];
+  const push = (zone: string, text: string): void => {
+    if (!groups.has(zone)) {
+      groups.set(zone, []);
+      order.push(zone);
+    }
+    groups.get(zone)!.push(text);
+  };
 
   for (const block of blocks) {
-    const status = block.status !== '' ? block.status : frontTag !== '' && block.zone === frontTag ? 'front' : 'back';
+    let zone = block.zone;
+    // 显式【移入/移出】优先于旧格式的【状态】；旧状态只在没有显式归属时兜底。
+    if (!block.explicitZone) {
+      if (block.status === 'back') zone = '';
+      else if (zone === '' && block.status === 'front' && frontTag !== '') zone = frontTag;
+    }
     const body = block.body.trim();
-    const text = `### ${block.title}\n【状态】${status === 'front' ? '前台' : '后台'}${body === '' ? '' : `\n${body}`}`;
-    if (status === 'front') front.push(text);
-    else back.push(text);
+    const text = `### ${block.title}${body === '' ? '' : `\n${body}`}`;
+    push(zone, text);
   }
 
-  if (frontTag !== '') {
-    const frontText = `<${frontTag}>${front.length === 0 ? '' : `\n${front.join('\n\n')}\n`}</${frontTag}>`;
-    return [frontText, ...back].filter(Boolean).join('\n\n');
+  const parts: string[] = [];
+  for (const zone of order) {
+    const textBlocks = groups.get(zone) ?? [];
+    if (textBlocks.length === 0) continue;
+    if (zone === '') parts.push(...textBlocks);
+    else parts.push(`<${zone}>\n${textBlocks.join('\n\n')}\n</${zone}>`);
   }
-  return [...front, ...back].join('\n\n');
+  return parts.join('\n\n');
 }
 
 /**
@@ -341,7 +382,8 @@ export function mergeBlockDocument(previousText: string, patchText: string): str
         ...existing,
         body: mergeBlockBody(existing.body, block.body),
         status: block.status !== '' ? block.status : existing.status,
-        zone: block.status !== '' ? '' : existing.zone,
+        zone: block.explicitZone ? block.zone : existing.zone,
+        explicitZone: block.explicitZone || existing.explicitZone,
       });
     } else {
       merged.set(block.title, { ...block, order: merged.size });
@@ -351,6 +393,194 @@ export function mergeBlockDocument(previousText: string, patchText: string): str
   const blocks = Array.from(merged.values()).sort((left, right) => left.order - right.order);
   const frontTag = previousDoc.frontTag !== '' ? previousDoc.frontTag : patchDoc.frontTag;
   return renderBlockDoc(blocks, frontTag);
+}
+
+interface TablePart {
+  kind: 'text' | 'table';
+  /** 文本区（kind=text） */
+  lines?: string[];
+  /** 表格区（kind=table） */
+  header?: string;
+  separator?: string;
+  rows?: string[];
+}
+
+interface TableDocument {
+  parts: TablePart[];
+}
+
+const TABLE_LINE_RE = /^\s*\|.*\|\s*$/;
+const TABLE_SEPARATOR_RE = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
+
+/** 把一段含 Markdown 表格的文本拆成「文字区 / 表格区」。 */
+function parseTableDocument(text: string): TableDocument {
+  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+  const parts: TablePart[] = [];
+  let buffer: string[] = [];
+
+  const flushText = (): void => {
+    if (buffer.length === 0) return;
+    parts.push({ kind: 'text', lines: buffer });
+    buffer = [];
+  };
+
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    const next = index + 1 < lines.length ? lines[index + 1] : '';
+    if (TABLE_LINE_RE.test(line) && TABLE_SEPARATOR_RE.test(next)) {
+      flushText();
+      const rows: string[] = [];
+      index += 2;
+      while (index < lines.length && TABLE_LINE_RE.test(lines[index])) {
+        rows.push(lines[index]);
+        index += 1;
+      }
+      parts.push({ kind: 'table', header: line, separator: next, rows });
+      continue;
+    }
+    buffer.push(line);
+    index += 1;
+  }
+  flushText();
+  return { parts };
+}
+
+function renderTableDocument(doc: TableDocument): string {
+  const chunks: string[] = [];
+  for (const part of doc.parts) {
+    if (part.kind === 'text') {
+      const text = (part.lines ?? []).join('\n');
+      if (text.trim() !== '') chunks.push(text);
+      continue;
+    }
+    chunks.push([part.header ?? '', part.separator ?? '', ...(part.rows ?? [])].join('\n'));
+  }
+  return chunks.join('\n\n').trim();
+}
+
+/** 表格行键：第一列。 */
+function tableRowKey(row: string): string {
+  const cells = String(row ?? '')
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|');
+  return (cells[0] ?? '').trim();
+}
+
+function collectTableDeletes(text: string): string[] {
+  const out: string[] = [];
+  for (const line of String(text ?? '').replace(/\r\n?/g, '\n').split('\n')) {
+    const match = /^【\s*删除\s*】\s*(.+)$/.exec(line.trim());
+    if (match) out.push(match[1].trim());
+  }
+  return out;
+}
+
+/**
+ * 表格行级合并：
+ * - 表头/分隔行保持原样；
+ * - 有变化的数据行按第一列（角色名）替换或新增；
+ * - `【删除】角色名` 删除所有表里第一列匹配的行；
+ * - 没提到的行保留上一轮。
+ */
+export function mergeTableDocument(previousText: string, patchText: string): string {
+  const previous = String(previousText ?? '').trim();
+  const patch = String(patchText ?? '').trim();
+  if (previous === '') return patch;
+  if (isNoChangeText(patch)) return previous;
+
+  const previousDoc = parseTableDocument(previous);
+  const patchDoc = parseTableDocument(patch);
+  const deletes = collectTableDeletes(patch);
+  const previousTables = previousDoc.parts.filter(part => part.kind === 'table');
+  const patchTables = patchDoc.parts.filter(part => part.kind === 'table');
+
+  if (previousTables.length === 0) return patch;
+  if (patchTables.length === 0 && deletes.length === 0) return previous;
+
+  const nextParts: TablePart[] = previousDoc.parts.map(part => {
+    if (part.kind !== 'table') return { ...part, lines: [...(part.lines ?? [])] };
+    const rows = (part.rows ?? []).filter(row => !deletes.includes(tableRowKey(row)));
+    return { ...part, rows };
+  });
+
+  for (const patchTable of patchTables) {
+    const header = String(patchTable.header ?? '').trim();
+    const targetIndex = nextParts.findIndex(
+      part => part.kind === 'table' && String(part.header ?? '').trim() === header,
+    );
+    if (targetIndex < 0) {
+      nextParts.push({
+        kind: 'table',
+        header: patchTable.header,
+        separator: patchTable.separator,
+        rows: [...(patchTable.rows ?? [])],
+      });
+      continue;
+    }
+    const target = nextParts[targetIndex];
+    const rows = [...(target.rows ?? [])];
+    const byKey = new Map<string, number>();
+    rows.forEach((row, rowIndex) => byKey.set(tableRowKey(row), rowIndex));
+    for (const patchRow of patchTable.rows ?? []) {
+      const key = tableRowKey(patchRow);
+      const at = byKey.get(key);
+      if (at === undefined) {
+        byKey.set(key, rows.length);
+        rows.push(patchRow);
+      } else {
+        rows[at] = patchRow;
+      }
+    }
+    nextParts[targetIndex] = { ...target, rows };
+  }
+
+  return renderTableDocument({ parts: nextParts });
+}
+
+/** 这内容像不像块文档（至少一个 `###` 标题）。 */
+export function hasBlockStructure(text: string): boolean {
+  return /^###\s+\S/m.test(String(text ?? ''));
+}
+
+/** 这内容像不像 Markdown 表格（至少一张有分隔行的表）。 */
+export function hasTableStructure(text: string): boolean {
+  return parseTableDocument(text).parts.some(part => part.kind === 'table');
+}
+
+/**
+ * 上一轮该标签的格式跟当前模式对不上吗？
+ *
+ * 用户口径（2026-11-06）：比如 `character_info` 上一轮还是表格、这一轮已经改成块模式，
+ * 即使这个标签设了「按块合并」，也要先触发一次全量更新，而不是拿表格当底稿做差量。
+ */
+export function tagNeedsFullRefresh(mode: TagDiffMode, previousText: string): boolean {
+  const previous = String(previousText ?? '').trim();
+  if (previous === '') return false;
+  if (mode === 'blocks') return !hasBlockStructure(previous);
+  if (mode === 'table') return !hasTableStructure(previous);
+  return false;
+}
+
+/**
+ * 一个任务里有哪些差量标签需要「本轮先全量」。
+ * `round.ts` 用它给 AI 追加一段系统提醒；`applyTagDiffs` 用它决定不合并、直接替换。
+ */
+export function tagsNeedingFullRefresh(
+  task: TagDiffTaskLike,
+  modes: Record<string, TagDiffMode>,
+  previousTags: TagMap,
+): string[] {
+  const names = splitTagList(`${task.extractTags || ''},${task.extractInjectTags || ''}`);
+  const out: string[] = [];
+  for (const name of names) {
+    const mode = normalizeTagDiffMode(modes[name]);
+    if (!tagNeedsFullRefresh(mode, previousContentOf(previousTags, name))) continue;
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
 }
 
 export interface TagDiffTaskLike {
@@ -405,8 +635,16 @@ export function applyTagDiffs(input: ApplyTagDiffsInput): string {
       continue;
     }
 
+    // 旧格式（如上一轮还是表格）遇到块模式：本轮先全量替换，不拿旧格式当底稿做差量。
+    if (tagNeedsFullRefresh(mode, previous)) {
+      contents.set(name, current);
+      continue;
+    }
+
     if (mode === 'keep') {
       contents.set(name, current);
+    } else if (mode === 'table') {
+      contents.set(name, mergeTableDocument(previous, current));
     } else {
       contents.set(name, mergeBlockDocument(previous, current));
     }

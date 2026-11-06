@@ -56,7 +56,7 @@ function modeOf(tag: string): string {
 
 function setMode(tag: string, value: string): void {
   if (!props.draft.tagDiffModes) props.draft.tagDiffModes = {};
-  if (value === 'keep' || value === 'blocks') props.draft.tagDiffModes[tag] = value;
+  if (value === 'keep' || value === 'blocks' || value === 'table') props.draft.tagDiffModes[tag] = value;
   else delete props.draft.tagDiffModes[tag];
 }
 </script>
@@ -94,6 +94,7 @@ function setMode(tag: string, value: string): void {
         <option value="off">{{ UI.plot.tagDiffOff }}</option>
         <option value="keep">{{ UI.plot.tagDiffKeep }}</option>
         <option value="blocks">{{ UI.plot.tagDiffBlocks }}</option>
+        <option value="table">{{ UI.plot.tagDiffTable }}</option>
       </select>
     </div>
   </div>

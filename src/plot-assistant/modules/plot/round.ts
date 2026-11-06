@@ -18,7 +18,7 @@ import { performReplacements } from './eng/prompt-build';
 import { runPlotRound, type PlotRoundMessage, type PlotRoundOutcome, type SettledResult, type TaskLogInfo, type TaskProgressInfo } from './eng/engine';
 import { normalizeRound, selectTasksForRound, type ScheduleReason } from './eng/schedule';
 import { buildTagMap, type TagMap } from './eng/tags';
-import { applyTagDiffs, collectKnownTagNames } from './eng/tag-diff';
+import { applyTagDiffs, collectKnownTagNames, tagsNeedingFullRefresh } from './eng/tag-diff';
 import type { PlotTask } from './eng/task-model';
 import type { StashWorking } from './stash-model';
 
@@ -170,7 +170,18 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
       // 没递（比如算提示词条数那一次）就退到续跑起点。
       relayTagMap: relayTagMap ?? resume.relayTagMap,
     };
-    return renderTaskMessages(task, context);
+    const messages = renderTaskMessages(task, context);
+
+    // 旧格式保底：上一轮某个差量标签还是表格、这一轮已改成块（或反过来），
+    // 先提醒 AI 本轮必须输出完整内容；合并端也会按「全量替换」处理。
+    const refreshTags = tagsNeedingFullRefresh(task, config.tagDiffModes, historyTagMap);
+    if (refreshTags.length > 0) {
+      messages.push({
+        role: 'system',
+        content: `【差量格式提醒】上一轮的这些标签不是当前模式要求的格式：${refreshTags.join('、')}。本轮必须输出这些标签的完整内容（不要只写变化块，也不要写【无变化】），否则旧格式会被整份替换。`,
+      });
+    }
+    return messages;
   };
 
   // ── 最终注入指令也要走一遍 `$` 占位符替换 ──
