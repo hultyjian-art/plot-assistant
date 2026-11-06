@@ -265,6 +265,12 @@ function asDelay(value: unknown, fallback: number): number {
   return Number.isFinite(n) && n >= 10 ? Math.round(n) : fallback;
 }
 
+/** 计类型数字的规整：非数字、或小于该项下限的，一律退回默认值。 */
+function asCount(value: unknown, fallback: number, min: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) && n >= min ? Math.round(n) : fallback;
+}
+
 /**
  * 面板保存前把数字钳回合法区间（与 SettingsZ 的下限同源）。
  * 不钳的话，面板里手输一个 0 会先落到酒馆变量里，下次读取时 zod 校验不过，
@@ -339,6 +345,10 @@ function readPresetList(source: unknown): RegexPreset[] {
 function readCapture(source: unknown): CaptureSettings {
   const raw = (source ?? {}) as Partial<CaptureSettings>;
   return { fromAiFloor: asFlag(raw.fromAiFloor, FALLBACK_SETTINGS.capture.fromAiFloor) };
+}
+
+function asText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
 }
 
 /**

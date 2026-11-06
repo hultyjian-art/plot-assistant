@@ -8,7 +8,6 @@ import { createScriptIdDiv, teleportStyle } from '@util/script';
 import { INSTANCE_ATTR, MODAL_HOST_ID } from '../constants';
 import { pageQuery, pageToastr } from '../tavern';
 import { loadSettings, saveSettings } from '../settings';
-import { profile } from '../profile';
 import { logInfo } from '../logger';
 import { MSG, TAG } from '../copy';
 import SettingsPanel from './SettingsPanel.vue';

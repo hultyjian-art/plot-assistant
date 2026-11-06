@@ -32,7 +32,7 @@ function isRegenerateLabel(text: string): boolean {
 
 /**
  * 原生重刷：三条路径按可靠性从高到低依次尝试。
- * 返回是否真的把重刷下达出去了——调用方要靠它判断这一轮到底有没有发出去。
+ * 返回是否真的把重刷下达出去了。
  */
 export async function runNativeRefresh(ctx: RerushContext): Promise<boolean> {
   const p$ = pageQuery();
@@ -51,6 +51,8 @@ export async function runNativeRefresh(ctx: RerushContext): Promise<boolean> {
   if (historyEditOpen()) return refuse(MSG.blockedByEditingBrief);
   if (hasDraft()) return refuse(MSG.blockedByNotEmptyBox);
   if (aiIsStreaming()) return refuse(MSG.blockedWhileGenerating);
+
+  // 换插头放在闸门之后：被拦下的一轮不应该白换一次插头
 
   let triggered = false;
 
@@ -284,6 +286,8 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
 
     // 回填修改没有推进结果，填回去的就是正则从楼层里捞出来的原文
     putIntoInputBox(plotResult ? plotResult.text : captured.text);
+
+    // 只有真要发请求时才换插头：全流程重刷会替用户按下发送，回填修改不发
 
     const ids = floorRangeToDelete(target.messageId);
     const tailFloor = ids[ids.length - 1];

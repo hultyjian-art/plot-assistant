@@ -2,7 +2,7 @@
  * 脚本按钮模块：
  * - 用酒馆助手官方接口把按钮注册到 QR / 脚本按钮区
  * - 从 `#script_container_<scriptId>` 里把渲染出来的按钮找回来
- * 按钮文字就是产物显示名，注册与找回共用同一个来源。
+ * 按钮文字就是产物显示名（完整版「剧情推进助手」/ 轻量版「剧情推进助手·轻」），注册与找回共用同一个来源。
  */
 import { profile } from './profile';
 import { pageQuery } from './tavern';

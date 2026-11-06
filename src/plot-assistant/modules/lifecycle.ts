@@ -11,7 +11,6 @@ import { mountGestureWatch } from './gesture';
 import { claimInstance, releaseInstance } from './instance';
 import { logInfo, logWarn, logError } from './logger';
 import { mountPlotSendGate } from './plot/send-gate';
-import { profile } from './profile';
 import { scriptButtonExists } from './script-button';
 import { loadSettings, FALLBACK_SETTINGS } from './settings';
 import { pageQuery, tavernGlobal, helperGlobal, pageToastr } from './tavern';
@@ -19,9 +18,7 @@ import { MSG, TAG } from './copy';
 import { mountFloorSync } from './plot/floor-sync';
 import type { RerushContext } from './types';
 
-/**
- * 装载。
- */
+/** 装载。 */
 export function bootstrap(ctx: RerushContext): void {
   let torn = false;
 
@@ -115,6 +112,7 @@ export function bootstrap(ctx: RerushContext): void {
 /**
  * 入口统一用的启动函数：建上下文（默认设置深拷一份，免得装载失败时把默认值本身改脏）、
  * 声明"保存后要重注册脚本按钮"，再在 jQuery 的加载时机里装载。
+ * 完整版与轻量版「剧情推进助手·轻」两个入口都走这里，差别只在各自先 useProfile() 了哪套档案。
  */
 export function startRerush(): void {
   const ctx: RerushContext = {

@@ -283,7 +283,7 @@ export interface TavernLike {
   name2?: string;
   eventSource?: {
     on(event: string, listener: (...args: unknown[]) => void): void;
-    /** 部分版本才有；卸载监听时用它摘掉，缺了就交给 iframe 回收 */
+    /** 部分版本才有；卸载时用它摘掉监听，缺了就交给 iframe 回收 */
     removeListener?(event: string, listener: (...args: unknown[]) => void): void;
   };
   /** 把酒馆设置写盘（防抖版，改完连接配置的模型后用它） */

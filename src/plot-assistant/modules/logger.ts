@@ -12,7 +12,7 @@ const LINE_LIMIT = 60;
 
 const lines: string[] = [];
 
-/** 日志前缀取产物显示名：酒馆 Console 里能一眼认出是哪个脚本。 */
+/** 日志前缀取产物显示名：酒馆 Console 里能一眼分清是完整版还是「剧情推进助手·轻」。 */
 function tag(): string {
   return profile().displayName;
 }

@@ -13,6 +13,8 @@ import { UI } from '../copy';
 import { editLanding, listEntries, removeLanding } from '../plot/stash-flow';
 import { landingGap, landingSeqOf, setActiveLanding, type LandingGap } from '../plot/stash-model';
 import { readPanelStash, savePanelStash } from '../plot/stash-state';
+import { commitStashImport, exportStashToText, prepareStashImport } from '../plot/stash-port-flow';
+import type { ImportPlan, StashPortFile } from '../plot/stash-port';
 import { blockPreview, removeTagBlocks, scanTagBlocks } from '../plot/stash-edit';
 import { landingInFloor } from '../plot/stash-apply';
 import { applyLandingToFloorMessage, putLandingIntoInputBox, readFloorText } from '../plot/stash-apply-io';
@@ -70,6 +72,126 @@ function inUse(entry: StashEntry, landing: StashLanding): boolean {
 }
 
 onMounted(reload);
+
+// ── 导出 / 导入：把账带到别的聊天文件里 ──
+//
+// 账本认的是楼层号，换个聊天文件楼层号就全变了。所以导入不是「合并」，是把源账的
+// 楼层号**重映射**到本聊天最新的几层用户楼层（`claimFloor` 里连正文对不上的
+// `pending` 账都认，因为锚本来就是楼层号）。目标层本来就有账时先问一句再覆盖。
+
+const portInput = ref<HTMLInputElement | null>(null);
+const portNote = ref('');
+const askPortOverwrite = ref(false);
+const pendingPort = ref<{ file: StashPortFile; plan: ImportPlan } | null>(null);
+
+/** 打开系统的选文件框。`ref` 指向模板里那个隐藏的 `<input type="file">`。 */
+function pickPortFile(): void {
+  portInput.value?.click();
+}
+
+/** 文件名带时间：连着导两次时，两个同名文件在下载夹里不会互相覆盖。 */
+function portFileName(): string {
+  const now = new Date();
+  const two = (value: number): string => String(value).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}`;
+  return `剧情推进助手-暂存区-${stamp}.json`;
+}
+
+/**
+ * 下载。写法照 `PresetIo.vue:67-77` 抄的：Blob + createObjectURL + `a.click()`，
+ * 再**立刻**在下一个事件循环里回收 —— 那时下载已经开始了。
+ */
+function exportStash(): void {
+  try {
+    const loaded = readPanelStash();
+    const text = exportStashToText(loaded.stash, loaded.chatKey, Date.now());
+    const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = portFileName();
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    portNote.value = t.stashExportDone;
+  } catch (error) {
+    console.error('[剧情推进助手] 导出暂存失败', error);
+    portNote.value = t.ioFailed(String((error as Error)?.message ?? error));
+  }
+}
+
+/** 选文件 → 解析 → 算配对。有冲突就先问，没冲突直接落。 */
+function importFromFile(event: Event): void {
+  const input = event.target as HTMLInputElement | null;
+  const file = input && input.files ? input.files[0] : null;
+  if (!input || !file) return;
+  portNote.value = '';
+  const reader = new FileReader();
+  reader.onload = () => {
+    // 同一个文件改完再导一次时必须清空，否则不会再触发 change（PresetIo.vue:63 同款）。
+    input.value = '';
+    const text = typeof reader.result === 'string' ? reader.result : '';
+    if (!stash.value) {
+      portNote.value = t.stashImportNoStash;
+      return;
+    }
+    const prep = prepareStashImport(text, stash.value);
+    if (!prep.ok) {
+      portNote.value = t.ioFailed(prep.error);
+      return;
+    }
+    pendingPort.value = { file: prep.file, plan: prep.plan };
+    if (prep.plan.conflicts.length > 0) {
+      askPortOverwrite.value = true;
+      return;
+    }
+    commitImport(prep.file, prep.plan);
+  };
+  reader.onerror = () => {
+    input.value = '';
+    portNote.value = t.ioFailed('读不了这个文件');
+  };
+  reader.readAsText(file);
+}
+
+/** 真正落账：整份替换写回聊天变量（和 `savePanelStash` 同一个口径）。 */
+function commitImport(file: StashPortFile, plan: ImportPlan): void {
+  if (!stash.value) return;
+  try {
+    const next = commitStashImport(stash.value, file, plan, Date.now());
+    savePanelStash(next);
+    stash.value = next;
+    readFloorTexts(next);
+    const lines: string[] = [t.stashImportDone(plan.pairs.length)];
+    if (plan.fallback === 'last') lines.push(t.stashImportFallbackLast);
+    if (plan.fallback === 'none') lines.push(t.stashImportFallbackNone);
+    if (plan.skipped > 0) lines.push(t.stashImportSkipped(plan.skipped));
+    portNote.value = lines.join(' ');
+    askPortOverwrite.value = false;
+    pendingPort.value = null;
+  } catch (error) {
+    console.error('[剧情推进助手] 导入暂存失败', error);
+    portNote.value = t.ioFailed(String((error as Error)?.message ?? error));
+  }
+}
+
+function confirmPortOverwrite(): void {
+  const pending = pendingPort.value;
+  if (!pending) return;
+  commitImport(pending.file, pending.plan);
+}
+
+function cancelPortOverwrite(): void {
+  askPortOverwrite.value = false;
+  pendingPort.value = null;
+  portNote.value = t.stashImportCancel;
+}
+
+/** 冲突楼层在提示里写成「3、5」这种。 */
+const conflictText = computed<string>(() => {
+  const pending = pendingPort.value;
+  if (!pending) return '';
+  return pending.plan.conflicts.map((floorId) => String(floorId)).join('、');
+});
 
 // ── 弹层状态 ──
 const openFloorId = ref<number | null>(null);
@@ -321,9 +443,36 @@ function landingTime(landing: StashLanding): string {
   <div class="acu-section">
     <div class="acu-row acu-row--between">
       <span class="acu-section__title">{{ t.stashTitle }}</span>
-      <button class="acu-btn acu-btn--sm" type="button" @click="reload">{{ t.stashRefresh }}</button>
+      <span class="acu-row">
+        <button class="acu-btn acu-btn--sm" type="button" :title="t.stashExportHint" @click="exportStash">
+          {{ t.stashExport }}
+        </button>
+        <button class="acu-btn acu-btn--sm" type="button" :title="t.stashImportHint" @click="pickPortFile">
+          {{ t.stashImport }}
+        </button>
+        <input
+          ref="portInput"
+          type="file"
+          accept=".json,application/json"
+          class="rh-hidden-file"
+          @change="importFromFile"
+        />
+        <button class="acu-btn acu-btn--sm" type="button" @click="reload">{{ t.stashRefresh }}</button>
+      </span>
     </div>
     <p class="acu-notes">{{ t.stashHint }}</p>
+    <p v-if="portNote" class="acu-notes">{{ portNote }}</p>
+    <template v-if="askPortOverwrite">
+      <p class="acu-notes acu-notes--warn">{{ t.stashImportAskOverwrite(conflictText) }}</p>
+      <div class="acu-row">
+        <button class="acu-btn acu-btn--sm" type="button" @click="confirmPortOverwrite">
+          {{ t.stashImportOverwrite }}
+        </button>
+        <button class="acu-btn acu-btn--sm" type="button" @click="cancelPortOverwrite">
+          {{ t.stashImportCancel }}
+        </button>
+      </div>
+    </template>
     <p v-if="warning === 'stash_unreadable'" class="acu-notes acu-notes--warn">{{ t.stashUnreadable }}</p>
 
     <p v-if="entries.length === 0" class="acu-notes">{{ t.stashEmpty }}</p>

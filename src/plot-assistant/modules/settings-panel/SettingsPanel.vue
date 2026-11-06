@@ -48,6 +48,12 @@ function readPlotDraft(source: PlotSettings): PlotSettings {
   return klona(source);
 }
 
+/**
+ * 拉到的模型列表只放在内存里（不写进设置）：它随时能从插头再拉一次，
+ * 落盘只会把酒馆变量撑大。放在模块级，所以关掉面板再打开还在。
+ */
+const modelCache: Record<string, string[]> = {};
+
 const activeTab = ref<'bindings' | 'capture' | 'feedback'>('bindings');
 /** 左侧功能列当前停在哪一套页面（推进重刷 / 剧情推进）。 */
 const activeSection = ref<'rerush' | 'plot'>('rerush');
@@ -72,7 +78,7 @@ function pickSection(key: string): void {
  */
 const maskStyle = computed(() => themeVars(draft.look.themeId));
 
-/** 功能列的两项。 */
+/** 功能列的两项。剧情推进不分产物 —— 完整版和轻量版都有这一套。 */
 const sections = [
   { key: 'rerush' as const, label: UI.sections.rerush },
   { key: 'plot' as const, label: UI.sections.plot },
@@ -91,7 +97,6 @@ const plotDirty = computed(() => plotPage.value?.isDirtyNow() ?? false);
 function discardPlot(): void {
   plotPage.value?.discardDraft();
 }
-/** 分页。 */
 const tabs = [
   { key: 'bindings' as const, label: UI.tabs.bindings },
   { key: 'capture' as const, label: UI.tabs.capture },
@@ -130,6 +135,10 @@ function restoreDefaults(): void {
 }
 
 onBeforeUnmount(() => {
+  if (liveTimer !== null) {
+    window.clearInterval(liveTimer);
+    liveTimer = null;
+  }
   // 正在拖的时候面板被关掉（例如点了蒙层）：监听与帧循环都要收干净，
   // 否则残留的 pointermove 会指向一段已经没有 DOM 的逻辑
   detachDragListeners();
@@ -483,6 +492,7 @@ function save(): void {
           </div>
           <p class="rh-note">{{ UI.timingHints.tapWindow }}</p>
           <p class="rh-note">{{ UI.timingHints.holdSpan }}</p>
+
         </section>
 
         <!-- 捕获链 -->
@@ -539,7 +549,6 @@ function save(): void {
             </div>
           </div>
         </section>
-
 
         <!-- 反馈与日志 -->
         <section v-if="activeTab === 'feedback'" class="rh-block">

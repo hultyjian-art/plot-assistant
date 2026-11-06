@@ -693,6 +693,11 @@ function onPresetImport(payload: { presets: Record<string, unknown>[]; skipped: 
   draft.presets = merged.presets;
   if (draft.presetName === '' && merged.presets.length > 0) draft.presetName = merged.presets[0].name;
   presetNote.value = UI.plot.ioImported(merged.added, merged.replaced, merged.skipped + payload.skipped);
+  // 导入是「一次动一批」，和 `importPresetsFromAcu` 一样要立刻落盘 + 重装编辑器。
+  // 少这两步时，同名覆盖只换了内存里的草稿：编辑器还摆着旧任务，面板一关这次导入就没了
+  // —— 用户看到的就是「导了新版，里面还是旧版」（2026-11-06 修）。
+  commitPlot();
+  loadEditor();
   refreshPresets();
 }
 

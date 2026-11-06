@@ -146,11 +146,12 @@ export const MSG = {
   settingsLoadFailed: '读脚本变量里的设置失败，这一轮先用默认值',
   settingsMigrated: '旧位置的设置已经搬到固定位置，以后换脚本也不会再丢',
   settingsDefaultsMigrated: '默认值升级过一次：右键的默认动作已改成「回填修改」',
+
 } as const;
 
 /** 设置面板界面文字。 */
 export const UI = {
-  /** 标题与菜单提示都带产物名 */
+  /** 标题与菜单提示都带产物名：完整版「剧情推进助手」，轻量版「剧情推进助手·轻」 */
   panelTitleOf: (name: string): string => `${name}设置`,
   menuTooltipOf: (name: string): string => `打开${name}的设置`,
   /** 左侧功能列：两个大功能，点哪个右边就进哪一套页面 */
@@ -412,6 +413,20 @@ export const UI = {
     stashModeQrfHint:
       '成果直接写进楼层的 qrf_plot 字段，与数据库脚本那套兼容。一层只有一版，没有「暂存」页。',
     stashModeBusy: '正在搬运已有成果…',
+    stashExport: '导出',
+    stashExportHint: '把这一份暂存区存成一个文件，带到别的聊天文件里去用。',
+    stashExportDone: '已导出。',
+    stashImport: '导入',
+    stashImportHint: '把另一个聊天导出过的暂存区文件读进来，按楼层号挂到最新几层上。',
+    stashImportNoStash: '账本还没读出来，先点一次刷新。',
+    stashImportAskOverwrite: (floors: string): string =>
+      `第 ${floors} 楼本来就有暂存成果，导入会把它换掉（换掉的还可以从旧版里找回）。确定覆盖吗？`,
+    stashImportOverwrite: '覆盖',
+    stashImportCancel: '先不导',
+    stashImportDone: (moved: number): string => `已导入 ${moved} 层账。`,
+    stashImportFallbackLast: '当前聊天的用户楼层不够三层，只挂到了最新那一层。',
+    stashImportFallbackNone: '当前聊天还没有楼层，账挂到了第 0 层。',
+    stashImportSkipped: (skipped: number): string => `源文件还有 ${skipped} 层没地方挂，已略过。`,
     stashQrfModeNote: '当前是 qrf 模式：成果直接写进楼层字段，一层一版，这里没有可切换的版本。',
     stashDirtyClose: '这一版还有没保存的改动，关掉就没了。',
     stashDirtyStay: '继续编辑',
