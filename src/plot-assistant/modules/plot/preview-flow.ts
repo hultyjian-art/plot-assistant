@@ -34,6 +34,7 @@ import { renderTaskMessages } from './eng/messages';
 import { buildRoundReplacements } from './eng/round-inputs';
 import { normalizeRound, selectTasksForRound } from './eng/schedule';
 import { buildTagMap } from './eng/tags';
+import { collectKnownTagNames } from './eng/tag-diff';
 import { buildPlotWorldbookTexts } from './data/worldbook-hits';
 import { resolveChatStateStore } from './data/chat-vars';
 import { resolveChatKey } from './chat-key';
@@ -160,7 +161,8 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
   //
   // 与真跑路径（`round.ts`）同一张表：`{{标签}}` 查不到就吐 `<标签></标签>` 空壳，
   // 而且不报错。预览必须跟真跑对得上，否则用户照着预览放行，实际发出去却是空标签。
-  const historyTagMap = buildTagMap(String(previousPlot ?? ''), null);
+  const knownTagNames = collectKnownTagNames(config.tasks, config.directiveTemplate);
+  const historyTagMap = buildTagMap(String(previousPlot ?? ''), null, knownTagNames);
   const tasks: PlotPreviewTask[] = [];
   for (const task of selection.due) {
     const messages: PlotRoundMessage[] = renderTaskMessages(task, {

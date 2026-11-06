@@ -192,7 +192,11 @@ export function listPlaceholderNames(text: string): string[] {
  * 给了名单就只找这几个（大小写不敏感、每名可多段）；没给名单就全扫 `<名>内容</名>`。
  * 没给名单时正则用的是反向引用 `\1`，所以 `<a>x</b>` 配不上。
  */
-export function buildTagMap(text: string, requestedTagNames: string[] | null = null): Map<string, string[]> {
+export function buildTagMap(
+  text: string,
+  requestedTagNames: string[] | null = null,
+  extraTagNames: readonly string[] = [],
+): Map<string, string[]> {
   const sourceText = String(text || '');
   const tagMap = new Map<string, string[]>();
   if (!sourceText.trim()) return tagMap;
@@ -200,6 +204,12 @@ export function buildTagMap(text: string, requestedTagNames: string[] | null = n
   if (Array.isArray(requestedTagNames) && requestedTagNames.length > 0) {
     const names = [...new Set(requestedTagNames.map((name) => String(name || '').trim()).filter(Boolean))];
     for (const name of names) {
+      const contents = extractAllTags(sourceText, name);
+      if (contents.length > 0) tagMap.set(name, contents);
+    }
+    for (const rawName of extraTagNames) {
+      const name = String(rawName || '').trim();
+      if (!name) continue;
       const contents = extractAllTags(sourceText, name);
       if (contents.length > 0) tagMap.set(name, contents);
     }
@@ -215,6 +225,15 @@ export function buildTagMap(text: string, requestedTagNames: string[] | null = n
     const bucket = tagMap.get(tagName);
     if (bucket) bucket.push(content);
     else tagMap.set(tagName, [content]);
+  }
+
+  // 上面那轮只认最外层的一对 `<英文名>`；`character_archive` 嵌在 `character_info`
+  // 里面时会被外层整块吃掉。这里再按已知标签名逐个找一遍，嵌套标签也能单独取到。
+  for (const rawName of extraTagNames) {
+    const name = String(rawName || '').trim();
+    if (!name) continue;
+    const contents = extractAllTags(sourceText, name);
+    if (contents.length > 0) tagMap.set(name, contents);
   }
 
   return tagMap;

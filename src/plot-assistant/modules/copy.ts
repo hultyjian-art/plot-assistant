@@ -257,6 +257,15 @@ export const UI = {
     editorPromptFinal: '正文',
     editorPromptFinalHint: '这一段的正文会在跑完之后接在你的输入后面。留空 = 什么都不注入。',
 
+    /** 预设编辑器：标签差量 */
+    editorTagDiff: '标签差量',
+    editorTagDiffHint:
+      '按标签单独设置：关闭 = 每轮全量输出；整标签保留 = 本轮没输出这个标签就沿用上一轮；按块合并 = 只写变动的 ### 小节，没写的沿用上一轮。',
+    editorTagDiffEmpty: '这个预设里还没有标签。先在任务的「抽取标签」里写标签名，或在最终注入指令里用 {{标签}}。',
+    tagDiffOff: '关闭（每轮全量）',
+    tagDiffKeep: '整标签保留',
+    tagDiffBlocks: '按块合并',
+
     /** 预设编辑器：标签与规则 */
     editorTags: '标签筛选',
     editorExtractRules: '提取规则',

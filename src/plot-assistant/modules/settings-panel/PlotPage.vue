@@ -1431,7 +1431,7 @@ function keyMask(key: string): string {
       </div>
 
       <template v-if="editorDraft !== null">
-        <PresetEditor :draft="editorDraft" />
+        <PresetEditor :draft="editorDraft" :tasks="editorTasks" />
         <TaskEditor
           :tasks="editorTasks"
           :preset-name="draft.presetName"

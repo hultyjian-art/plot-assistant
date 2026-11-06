@@ -18,6 +18,7 @@ import { performReplacements } from './eng/prompt-build';
 import { runPlotRound, type PlotRoundMessage, type PlotRoundOutcome, type SettledResult, type TaskLogInfo, type TaskProgressInfo } from './eng/engine';
 import { normalizeRound, selectTasksForRound, type ScheduleReason } from './eng/schedule';
 import { buildTagMap, type TagMap } from './eng/tags';
+import { applyTagDiffs, collectKnownTagNames } from './eng/tag-diff';
 import type { PlotTask } from './eng/task-model';
 import type { StashWorking } from './stash-model';
 
@@ -150,7 +151,11 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
   // 上游在 `plot-task-engine.ts:474` 用 `buildPlotTagMapFromText_ACU(lastPlotContent, null)`
   // 建同一张表；我们 `resolveTag` 的「先查阶段接力、查不到退历史」已经是上游那个优先级，
   // 缺的只是把值喂进来。传 `null` = 不限定名单，把上一轮出现的标签全扫进来。
-  const historyTagMap = buildTagMap(String(deps.previousPlot ?? ''), null);
+  // 已知标签名：任务抽取标签 + 最终注入里的 {{标签}}。多传这一列是为了让
+  // `buildTagMap` 在「最外层整块扫描」之后再按名字逐个补一遍——嵌套在
+  // `character_info` 里的 `character_archive` 也能单独取到。
+  const knownTagNames = collectKnownTagNames(config.tasks, config.directiveTemplate);
+  const historyTagMap = buildTagMap(String(deps.previousPlot ?? ''), null, knownTagNames);
 
   const renderMessages = (task: PlotTask, relayTagMap?: TagMap): PlotRoundMessage[] => {
     const context: TaskRenderContext = {
@@ -204,7 +209,17 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
     tasks: runnableTasks,
     finalDirectiveTemplate: directiveTemplate,
     renderMessages: (task, context) => renderMessages(task, context.relayTagMap),
-    callApi: (messages, task, attemptIndex) => deps.callApi(messages, task, attemptIndex),
+    // 标签级差量：AI 回传的只是变化补丁，先按上一轮标签投影合并成完整回传，
+    // 再交给原来的验收/聚合/落盘链。没有开启任何差量标签时原样返回。
+    callApi: async (messages, task, attemptIndex) => {
+      const raw = await deps.callApi(messages, task, attemptIndex);
+      return applyTagDiffs({
+        rawResponse: raw,
+        task,
+        modes: config.tagDiffModes,
+        previousTags: historyTagMap,
+      });
+    },
     checkAbort: deps.checkAbort,
     isAbort: deps.isAbort,
     onTaskSettled: deps.onTaskSettled,

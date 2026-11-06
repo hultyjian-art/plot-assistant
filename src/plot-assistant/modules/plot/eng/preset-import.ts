@@ -20,6 +20,7 @@ import type { BoundaryRule } from './context-tags';
 import { normalizeRules } from './context-tags';
 import type { PlotPromptSegment, PlotTask } from './task-model';
 import { legacyPromptFromThree, normalizeTasks } from './task-model';
+import { normalizeTagDiffModes, type TagDiffMode } from './tag-diff';
 
 /** 引擎整轮拿到的、来自某一份预设的全部配置。 */
 export interface PlotPresetConfig {
@@ -31,6 +32,13 @@ export interface PlotPresetConfig {
   directiveTemplate: string;
   /** `$7` 取多少条前文 AI 输出。 */
   contextTurnCount: number;
+  /**
+   * 预设级「标签名 → 差量模式」。
+   *
+   * 标签级而不是任务级：一个任务可能同时产出快照标签和积累标签，
+   * 真正跨轮存活的是标签，不是任务。
+   */
+  tagDiffModes: Record<string, TagDiffMode>;
   /** 从上下文里「抠出来」的区间规则。 */
   extractRules: BoundaryRule[];
   /** 从上下文里「删掉」的区间规则。 */
@@ -143,6 +151,7 @@ export function importPresetConfig(preset: unknown, options: ImportPresetOptions
     tasks: normalizeTasks(base, { fallbackTaskName: String(options.fallbackTaskName || '默认任务') }, deps),
     directiveTemplate: readDirectiveTemplate(base),
     contextTurnCount: readContextTurnCount(base, options.defaultContextTurnCount ?? DEFAULT_CONTEXT_TURN_COUNT),
+    tagDiffModes: normalizeTagDiffModes(record?.tagDiffModes),
     extractRules: readExtractRules(base),
     excludeRules: readExcludeRules(base),
     usedFallbackTask: rawTasks.length === 0,

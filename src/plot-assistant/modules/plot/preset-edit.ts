@@ -22,6 +22,7 @@ import type { BoundaryRule } from './eng/context-tags';
 import { normalizeRules } from './eng/context-tags';
 import type { PlotPromptSegment } from './eng/task-model';
 import { normalizeEveryRounds } from './eng/schedule';
+import { normalizeTagDiffModes, type TagDiffMode } from './eng/tag-diff';
 import { isStoredPresetWrapper, unwrapPresetPayload } from './data/preset-store';
 
 type Loose = Record<string, unknown>;
@@ -73,6 +74,12 @@ export type PresetRuleDraft = BoundaryRule;
 export interface PresetDraft {
   meta: PresetMetaDraft;
   prompts: PresetPromptDraft;
+  /**
+   * 标签级差量开关：`标签名 → 模式`。
+   *
+   * 只存非 `off` 的项；没出现的标签 = 每轮全量。
+   */
+  tagDiffModes: Record<string, TagDiffMode>;
   extractRules: PresetRuleDraft[];
   excludeRules: PresetRuleDraft[];
 }
@@ -298,6 +305,7 @@ export function readPresetDraft(data: unknown): PresetDraft {
       // 否则面板显示的值与引擎实际用的值会分叉（用户改了却没效果，最难查）。
       finalDirective: readFinalDirective(record),
     },
+    tagDiffModes: normalizeTagDiffModes(record.tagDiffModes),
     extractRules: splitRuleList(normalizeRules(record.contextExtractRules, text(record.contextExtractTags))),
     excludeRules: splitRuleList(normalizeRules(record.contextExcludeRules, text(record.contextExcludeTags))),
   };
@@ -357,6 +365,13 @@ export function applyPresetDraft(data: unknown, draft: PresetDraft): Loose {
   // 也不碰 `recallCount` / `rateMain..rateCuckold` / 预设级 `minLength` / 预设级标签串：
   // 它们是兼容字段，界面上没有输入框，整份深拷时已经原样带走了 —— 这里再写一遍只会凭空造键。
   base.contextTurnCount = clampInt(meta.contextTurnCount, DEFAULT_CONTEXT_TURN_COUNT_DRAFT, 0);
+
+  // 标签差量：只写非 off 的项；用户没配就删键，别给导出的 JSON 添一堆空对象。
+  if (draft.tagDiffModes !== undefined) {
+    const modes = normalizeTagDiffModes(draft.tagDiffModes);
+    if (Object.keys(modes).length > 0) base.tagDiffModes = modes;
+    else delete base.tagDiffModes;
+  }
 
   base.contextExtractRules = writeRules(draft.extractRules);
   base.contextExcludeRules = writeRules(draft.excludeRules);
