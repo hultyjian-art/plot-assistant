@@ -415,6 +415,8 @@ export const UI = {
     stashRefresh: '刷新',
     stashFloor: (floorId: number): string => `第 ${floorId} 楼`,
     stashPending: (pending: number): string => `未完成，还欠 ${pending} 个任务`,
+    /** 楼层行上的进度入口：同一句话里直接告诉玩家「点这里能看进度」。 */
+    stashPendingProgress: (pending: number): string => `未完成，还欠 ${pending} 个任务 · 查看进度`,
     stashResumeHint: '点发送会接着这一版没跑完的任务继续跑。',
     stashComplete: '已完成',
     stashPreset: (name: string): string => `预设：${name}`,
@@ -476,12 +478,17 @@ export const UI = {
     stashRerunFailed: '没找到输入框，填不进去。',
     stashRerunOk: '已把这一版放回输入框，确认无误后点发送。',
     stashUseDirty: '先把改动保存（或放弃）再动楼层，免得用上没保存的内容。',
-    stashDelete: '删除这一版',
-    stashDeleteConfirm: '这一版删掉就找不回来了（楼层里已经写进去的内容不受影响）。确定删？',
+    stashDelete: '删除这一版（删光会连整层移除）',
+    stashDeleteConfirm: '这一版删掉就找不回来了（楼层里已经写进去的内容不受影响）。如果这是最后一版，这一层的暂存卡片也会一起移除。确定删？',
     stashDeleteCancel: '先不删',
     stashDeleteOk: '删掉',
     stashDeleted: '这一版已删除。',
     stashDeleteMissing: '这一版已经不在账本里了（可能刚被挤掉），刷新一下再看。',
+    stashDropVersion: '删这一版，保留楼层',
+    stashDropVersionConfirm: '只删掉这一版，这一层的暂存卡片和还没跑完的进度都留着（楼层里已经写进去的内容不受影响）。确定删？',
+    stashDropVersionCancel: '先不删',
+    stashDropVersionOk: '删掉这一版',
+    stashDropVersionDone: '这一版已删除，楼层还留着。',
 
     /** 搜索与替换（2026-11-08 批 45）：跨所有楼层、所有版本找一段文字 */
     stashSearchOpen: '搜索暂存区（在所有楼层的所有版本里找）',
@@ -898,3 +905,24 @@ export const UI = {
   /** 用户新建的正则没填名称时用的占位名 */
   unnamedPreset: '没名字',
 } as const;
+
+/**
+ * 暂存楼层行的默认落点：正在用的那一版 → 最新一版 → 一版都没有返回 null。
+ *
+ * 抽成纯函数放本文件，是为了让 tools/plot-parity 能直接 import 真实实现做对照
+ * 测试（那套 commonjs 编译图静态引入不了 .vue）。
+ *
+ * 只看有没有落盘成果，**不看 working.pending**：「还欠着任务」只说明这层没全量
+ * 跑完，不该把已落盘的成果挡住（用户 2026-11-10 口径）；真正锁编辑的只有
+ * 「任务已发给 AI、还没回传」那段时间。
+ */
+export function pickStashEntryLanding<T extends { id: string }>(entry: {
+  landings: T[];
+  activeLandingId: string | null;
+}): T | null {
+  return (
+    entry.landings.find((item) => item.id === entry.activeLandingId) ??
+    entry.landings[entry.landings.length - 1] ??
+    null
+  );
+}

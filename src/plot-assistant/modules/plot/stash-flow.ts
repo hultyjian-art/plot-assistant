@@ -19,6 +19,7 @@ import {
   ORPHAN_MAX,
   claimFloor,
   createStash,
+  dropLanding,
   getEntry,
   landingGap,
   makeLandingId,
@@ -29,6 +30,7 @@ import {
   taskTagsFromResults,
   updateWorking,
   workingFromResults,
+  type LandingGap,
   type Stash,
   type StashEntry,
   type StashLanding,
@@ -151,8 +153,18 @@ export function planStashRun(input: PlanStashRunInput): PlanStashRunResult {
     // 用户口径（2026-11-04）：已经落盘的任务不再重发；**只有这一轮的任务全都落盘了才整轮重发**。
     const planned = (input.taskIds ?? []).filter((id) => typeof id === 'string' && id);
     const allDone = planned.length > 0 && planned.every((id) => entry.working?.done.includes(id) === true);
-    if (!allDone) {
-      return { stash, entry, working: entry.working, claim: 'pending', resumed: true };
+
+    // 玩家可能把已完成任务的标签从正文里删掉了：那些任务不能再算「已完成」。
+    // 缺口口径完全复用 landingGap（含「只进字段的标签不算缺口」），把不齐的从 done 挪回 pending。
+    const gap = workingTagGap(entry, input.floorText);
+    const lost = gap.taskIds.filter((id) => entry.working?.done.includes(id) === true);
+    const working: StashWorking = {
+      ...entry.working,
+      done: entry.working.done.filter((id) => !lost.includes(id)),
+      pending: dedupe([...entry.working.pending, ...lost]),
+    };
+    if (!allDone || lost.length > 0) {
+      return { stash, entry, working, claim: 'pending', resumed: true };
     }
   }
 
@@ -171,6 +183,29 @@ export function planStashRun(input: PlanStashRunInput): PlanStashRunResult {
 /** 一段正文里现在还剩哪些标签名。 */
 function presentTagNames(text: string): string[] {
   return splitPlotMessage(text).blocks.map((block) => block.tag);
+}
+
+/**
+ * 续跑前的标签核对：把「进度里记的账」当成一版成果，交给 `landingGap` 用同一套口径比。
+ *
+ * `StashWorking` 本身没有 `textTagNames`，就从这一层已落盘的某一版借「本该进正文的清单」；
+ * 老账（没有这个字段）由 `landingGap` 自己退回「全部标签减 injectOnly」。
+ */
+function workingTagGap(entry: StashEntry, floorText: string): LandingGap {
+  const working = entry.working;
+  if (!working) return { tags: [], taskIds: [] };
+  const textTagNames = entry.landings.find((item) => Array.isArray(item.textTagNames))?.textTagNames;
+  const probe: StashLanding = {
+    id: '',
+    createdAt: 0,
+    finalText: '',
+    presetName: '',
+    taskRaw: {},
+    complete: false,
+    taskTags: working.taskTags ?? {},
+    ...(textTagNames ? { textTagNames } : {}),
+  };
+  return landingGap(probe, presentTagNames(floorText));
 }
 
 /**
@@ -410,6 +445,21 @@ export function removeLanding(stash: Stash, floorId: number, landingId: string, 
       entry: updated,
     };
   }
+  return { stash: upsertEntry(stash, updated), entry: updated };
+}
+
+/**
+ * 面板「只删这一版、保留楼层」：删掉指定的一版，楼层条目（连同进度）留在账上。
+ * 和 `removeLanding` 的区别：那个删光最后一版会把整条卡片撤掉，这个不会。
+ */
+export function dropLandingVersion(stash: Stash, floorId: number, landingId: string, now: number): { stash: Stash; entry: StashEntry } | null {
+  const entry = getEntry(stash, floorId);
+  if (!entry) return null;
+  if (!entry.landings.some((item) => item.id === landingId)) return null;
+  const updated: StashEntry = {
+    ...dropLanding(entry, landingId),
+    lastUsedAt: Number.isFinite(now) ? now : Date.now(),
+  };
   return { stash: upsertEntry(stash, updated), entry: updated };
 }
 

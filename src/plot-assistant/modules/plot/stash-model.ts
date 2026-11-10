@@ -187,23 +187,35 @@ export function attachLandingsToChat(
  * 本来就带着子标签（character_archive），只有单独写 `{{character_archive}}`
  * 才只给子标签那份内容。
  *
- * 取「最近使用过的那一层」正在用的那一版；同名标签被多个任务产出时按序堆成数组，
- * 与 `buildTagMap` 产出的形状一致，可直接并进 `{{标签}}` 的历史表。
+ * 取「当前楼层之前」最近一层的标签，按 floorId 排，不看 lastUsedAt：同一楼层重跑第二版时
+ * 本层的 lastUsedAt 一定最新，按时间排序会选中本层自己，AI 就成了照抄上一版。
+ * 同名标签被多个任务产出时按序堆成数组，与 `buildTagMap` 产出的形状一致，可直接并进 `{{标签}}` 的历史表。
+ *
+ * @param currentFloorId 这一轮锚在哪一楼；只认 floorId 更小的层，本层及其之后的层一律不看。
+ *                       不传 = 没有「当前楼层」这个概念，取账本里楼层号最大的那一层。
  */
-export function collectStashTagMap(stash: Stash | null | undefined): Map<string, string[]> {
+export function collectStashTagMap(
+  stash: Stash | null | undefined,
+  currentFloorId: number = Number.POSITIVE_INFINITY,
+): Map<string, string[]> {
   const map = new Map<string, string[]>();
   const entries = Array.isArray(stash?.entries) ? [...(stash as Stash).entries] : [];
-  if (entries.length === 0) return map;
-  entries.sort((a, b) => (Number(b.lastUsedAt) || 0) - (Number(a.lastUsedAt) || 0));
-  const saved = activeLanding(entries[0])?.taskTags;
-  if (!saved) return map;
-  for (const record of Object.values(saved)) {
-    for (const [name, content] of Object.entries(record?.tags ?? {})) {
-      if (typeof content !== 'string' || content.trim() === '') continue;
-      const bucket = map.get(name);
-      if (bucket) bucket.push(content);
-      else map.set(name, [content]);
+  // 先按楼层号从新到旧排好，再逐层找标签；没标签的层往前让，走完仍没有就返回空表（绝不回退读本层）。
+  const candidates = entries
+    .filter(entry => (Number(entry.floorId) || 0) < currentFloorId)
+    .sort((a, b) => (Number(b.floorId) || 0) - (Number(a.floorId) || 0));
+  for (const entry of candidates) {
+    const saved = activeLanding(entry)?.taskTags;
+    if (!saved) continue;
+    for (const record of Object.values(saved)) {
+      for (const [name, content] of Object.entries(record?.tags ?? {})) {
+        if (typeof content !== 'string' || content.trim() === '') continue;
+        const bucket = map.get(name);
+        if (bucket) bucket.push(content);
+        else map.set(name, [content]);
+      }
     }
+    if (map.size > 0) break;
   }
   return map;
 }

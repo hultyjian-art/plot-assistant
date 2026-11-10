@@ -314,7 +314,7 @@ export async function appendPlotBlock(
   );
   const previousPlot = getPlotFromHistory(historyChat, {}, config.name);
   // `{{标签}}` 的主来源：暂存区账本里上一轮的标签投影（qrf 模式没有账本，退回上一楼层正文）。
-  const stashHistoryTags = useStash ? collectStashTagMap(stash) : null;
+  const stashHistoryTags = useStash ? collectStashTagMap(stash, anchor?.messageId ?? Number.POSITIVE_INFINITY) : null;
   const recentText = (historyLimit === 0 ? [] : rawChat.slice(-historyLimit))
     .map((item) => String(item.message ?? ''))
     .join('\n');

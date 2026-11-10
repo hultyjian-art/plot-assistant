@@ -172,7 +172,10 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
   const knownTagNames = collectKnownTagNames(config.tasks, config.directiveTemplate);
   const historyTagMap = buildTagMap(String(previousPlot ?? ''), null, knownTagNames);
   // 与真跑（round.ts）同一口径：{{标签}} 优先看暂存区账本里的上一轮标签投影。
-  if (stash) collectStashTagMap(stash).forEach((value, name) => historyTagMap.set(name, value));
+  // 预览是「即将发出的新一层」的预演：楼层号取真实最后一楼 + 1，与真跑 nextUserFloorId() 主路同源。
+  const lastMessageId = Number(rawChat[rawChat.length - 1]?.message_id);
+  const previewFloorId = Number.isFinite(lastMessageId) ? lastMessageId + 1 : Number.POSITIVE_INFINITY;
+  if (stash) collectStashTagMap(stash, previewFloorId).forEach((value, name) => historyTagMap.set(name, value));
   // 预览只读、不算续跑：`null` 起点给出的快照就是真跑「全新一轮」的那张接力表。
   const relayTagMap = buildResumePlan(config.tasks, null).relayTagMap;
   const tasks: PlotPreviewTask[] = [];

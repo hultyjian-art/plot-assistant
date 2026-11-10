@@ -9,9 +9,9 @@
  * 点「保存」才写回聊天变量；改了没保存就点叉，必须再问一次。
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
-import { UI } from '../copy';
+import { UI, pickStashEntryLanding } from '../copy';
 import type { RerushContext } from '../types';
-import { editLanding, listEntries, removeLanding } from '../plot/stash-flow';
+import { dropLandingVersion, editLanding, listEntries, removeLanding } from '../plot/stash-flow';
 import { landingGap, landingSeqOf, setActiveLanding, type LandingGap } from '../plot/stash-model';
 import { readPanelStash, savePanelStash } from '../plot/stash-state';
 import { commitStashImport, exportStashToText, prepareStashImport } from '../plot/stash-port-flow';
@@ -274,6 +274,7 @@ const draftText = ref('');
 const savedText = ref('');
 const askDiscard = ref(false);
 const askDelete = ref(false);
+const askDropVersion = ref(false);
 const busy = ref(false);
 const saveError = ref('');
 
@@ -414,6 +415,7 @@ function openViewer(entry: StashEntry, landing: StashLanding): void {
   savedText.value = landing.finalText;
   askDiscard.value = false;
   askDelete.value = false;
+  askDropVersion.value = false;
   saveError.value = '';
   notice.value = '';
 }
@@ -427,35 +429,35 @@ function openWorking(entry: StashEntry): void {
   savedText.value = '';
   askDiscard.value = false;
   askDelete.value = false;
+  askDropVersion.value = false;
   saveError.value = '';
   notice.value = '';
   closeSearch();
 }
 
-/** 这一行点下去会打开什么：还欠着任务时先看进度，跑完了才看成果。 */
+/** 这一行点下去会打开什么：有落盘成果就「查看」它，一版都没有才「查看进度」。 */
 function entryActionLabel(entry: StashEntry): string {
-  if (entry.working && Array.isArray(entry.working.pending) && entry.working.pending.length > 0) {
-    return t.stashViewProgress;
-  }
-  return entry.landings.length > 0 ? t.stashOpenView : t.stashViewProgress;
+  return pickStashEntryLanding(entry) ? t.stashOpenView : t.stashViewProgress;
 }
 
 /**
- * 点楼层那一行：还欠着任务就打开进度视图，让用户马上看到已经落盘了谁、还差谁；
- * 跑完了就打开正在用的那一版（没有 active 就开最新一版）。
- * **任何一层都必须有反应**（2026-11-09 第 8 条）。
+ * 点楼层那一行：默认打开已经落盘的成果，让玩家能直接看、直接改标签。
+ *
+ * 用户 2026-11-10：`working.pending`（还欠着任务）只说明这一层没全量跑完，
+ * 不该把已落盘的成果挡在进度视图后面 —— 真正该锁编辑的只有「任务已发给 AI、
+ * 还没回传」那段时间（`plotRunning`）。进度改由楼层行上那个
+ * 「未完成，还欠 N 个任务 · 查看进度」入口进去。
+ *
+ * 优先顺序：正在用的那一版（activeLandingId）→ 最新一版 → 一版都没有才退回进度视图
+ * （**任何一层都必须有反应**，2026-11-09 第 8 条）。
  */
 function openEntry(entry: StashEntry): void {
-  if (entry.working && Array.isArray(entry.working.pending) && entry.working.pending.length > 0) {
-    openWorking(entry);
+  const landing = pickStashEntryLanding(entry);
+  if (landing) {
+    openViewer(entry, landing);
     return;
   }
-  const landing =
-    entry.landings.find((item) => item.id === entry.activeLandingId) ??
-    entry.landings[entry.landings.length - 1] ??
-    null;
-  if (landing) openViewer(entry, landing);
-  else openWorking(entry);
+  openWorking(entry);
 }
 
 function resetViewer(): void {
@@ -466,6 +468,7 @@ function resetViewer(): void {
   savedText.value = '';
   askDiscard.value = false;
   askDelete.value = false;
+  askDropVersion.value = false;
   saveError.value = '';
   closeSearch();
 }
@@ -612,7 +615,43 @@ function rerunText(): void {
 
 /** 删这一版：先问一次，删完如果这条账一版都不剩，整条卡片就没了。 */
 function requestRemove(): void {
+  askDropVersion.value = false;
   askDelete.value = true;
+}
+
+/** 只删这一版、保留楼层：先问一次，删完这一层的卡片和进度都还在。 */
+function requestDropVersion(): void {
+  askDelete.value = false;
+  askDropVersion.value = true;
+}
+
+function confirmDropVersion(): void {
+  if (blockWhileRunning()) return;
+  const entry = currentEntry.value;
+  const landing = currentLanding.value;
+  if (!entry || !landing || !stash.value) return;
+  try {
+    const next = dropLandingVersion(stash.value, entry.floorId, landing.id, Date.now());
+    if (!next) {
+      saveError.value = t.stashDeleteMissing;
+      askDropVersion.value = false;
+      return;
+    }
+    savePanelStash(next.stash);
+    stash.value = next.stash;
+    askDropVersion.value = false;
+    const left = next.entry.landings;
+    if (left.length === 0) {
+      resetViewer();
+      notice.value = t.stashDropVersionDone;
+      return;
+    }
+    openViewer(next.entry, left[left.length - 1]);
+    notice.value = t.stashDropVersionDone;
+  } catch (error) {
+    console.error('[剧情推进助手] 删除版本失败', error);
+    saveError.value = String((error as Error)?.message ?? error);
+  }
 }
 
 function confirmRemove(): void {
@@ -891,8 +930,17 @@ function replaceAllInDraft(): void {
       >
         <span class="acu-stash-entry__floor">{{ t.stashFloor(entry.floorId) }}</span>
         <span class="acu-stash-entry__meta">{{ t.stashPreset(entry.presetName || '—') }}</span>
-        <span v-if="entry.state !== 'complete'" class="acu-stash-entry__state acu-stash-entry__state--pending">
-          {{ t.stashPending(entry.working ? entry.working.pending.length : 0) }}
+        <span
+          v-if="entry.state !== 'complete'"
+          class="acu-stash-entry__state acu-stash-entry__state--pending acu-stash-entry__state--clickable"
+          role="button"
+          tabindex="0"
+          :title="t.stashViewProgress"
+          style="cursor: pointer"
+          @click.stop="openWorking(entry)"
+          @keydown.enter.prevent.stop="openWorking(entry)"
+        >
+          {{ t.stashPendingProgress(entry.working ? entry.working.pending.length : 0) }}
         </span>
         <span v-else class="acu-stash-entry__state">{{ t.stashComplete }}</span>
         <span class="acu-stash-entry__open">{{ entryActionLabel(entry) }}</span>
@@ -1056,13 +1104,14 @@ function replaceAllInDraft(): void {
 
       <div v-if="viewerMode === 'landing'" class="acu-stash-dialog__foot">
         <p v-if="dirty" class="acu-notes acu-notes--sm acu-stash-dialog__hint">{{ t.stashUseDirty }}</p>
-        <button class="acu-btn acu-btn--sm" type="button" :disabled="dirty || busy || plotRunning" @click="applyToFloor">
+        <button class="acu-btn acu-btn--sm" type="button" :disabled="dirty || plotRunning" @click="applyToFloor">
           {{ t.stashApply }}
         </button>
         <button class="acu-btn acu-btn--sm" type="button" :disabled="dirty" @click="rerunText">
           {{ t.stashRerun }}
         </button>
         <button class="acu-btn acu-btn--sm danger" type="button" :disabled="plotRunning" @click="requestRemove">{{ t.stashDelete }}</button>
+        <button class="acu-btn acu-btn--sm" type="button" :disabled="plotRunning" @click="requestDropVersion">{{ t.stashDropVersion }}</button>
         <button class="acu-btn primary" type="button" :disabled="!dirty || plotRunning" @click="save">{{ t.stashSave }}</button>
       </div>
       <div v-else class="acu-stash-dialog__foot">
@@ -1074,6 +1123,14 @@ function replaceAllInDraft(): void {
         <div class="acu-stash-ask__btns">
           <button class="acu-btn acu-btn--sm" type="button" @click="askDelete = false">{{ t.stashDeleteCancel }}</button>
           <button class="acu-btn acu-btn--sm danger" type="button" :disabled="plotRunning" @click="confirmRemove">{{ t.stashDeleteOk }}</button>
+        </div>
+      </div>
+
+      <div v-if="viewerMode === 'landing' && askDropVersion" class="acu-stash-ask">
+        <p class="acu-stash-ask__text">{{ t.stashDropVersionConfirm }}</p>
+        <div class="acu-stash-ask__btns">
+          <button class="acu-btn acu-btn--sm" type="button" @click="askDropVersion = false">{{ t.stashDropVersionCancel }}</button>
+          <button class="acu-btn acu-btn--sm danger" type="button" :disabled="plotRunning" @click="confirmDropVersion">{{ t.stashDropVersionOk }}</button>
         </div>
       </div>
 
