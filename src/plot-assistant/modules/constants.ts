@@ -31,3 +31,20 @@ export const INSTANCE_ATTR = 'data-rh-instance';
  * 旧实例被替换时不会随它的 iframe 一起消失（详见 instance.ts 顶部注释）。
  */
 export const OWNED_NODE_IDS = [MODAL_HOST_ID, WAND_ENTRY_ID, CSS_NODE_ID];
+
+
+/**
+ * toastr 气泡停留时长（毫秒）。按信息量与严重程度分档，不是同一个值的手滑重复：
+ * 4000 一句短提示 / 5000 一般结果 / 6000 需要读一读的警告 /
+ * 7000 带原因的写回提示 / 8000 用户必须注意的重刷与中断。别合并成单一常量。
+ */
+export const TOAST_BRIEF_MS = 4000;
+export const TOAST_NORMAL_MS = 5000;
+export const TOAST_NOTICE_MS = 6000;
+export const TOAST_DETAIL_MS = 7000;
+export const TOAST_URGENT_MS = 8000;
+
+/** maxTokens 缺省值：老数据没写这个字段时用的那个数。 */
+export const DEFAULT_MAX_TOKENS = 60000;
+/** 生成请求重试间隔缺省（毫秒）；测试里传 0 跳过等待。 */
+export const DEFAULT_RETRY_DELAY_MS = 5000;

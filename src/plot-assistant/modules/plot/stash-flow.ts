@@ -248,6 +248,8 @@ export interface CommitLandingInput {
   /** 写进 `qrf_plot` 的原文 */
   saveContent: string;
   results: PlotTaskResult[];
+  /** 最终注入模板里写了的标签名（本该进正文的那些）；不传则按「全部标签」处理 */
+  textTagNames?: string[];
   now: number;
 }
 
@@ -271,7 +273,9 @@ export function commitLanding(input: CommitLandingInput): CommitLandingResult {
   const base: StashEntry = prev ?? newEntry(input.floorId, input.floorText, input.presetName, now);
 
   const landingId = makeLandingId(input.floorId, now, base.landings);
-  const taskTags = taskTagsFromResults(input.results);
+  // 续跑时本轮只跑剩下的任务，先前跑完的标签在 `base.working.taskTags` 里 ——
+  // 落盘必须把两半合起来，否则这一版会看起来「缺了上半场」。
+  const taskTags = mergeTaskTags(base.working?.taskTags, taskTagsFromResults(input.results));
   const landing: StashLanding = {
     id: landingId,
     createdAt: now,
@@ -280,6 +284,8 @@ export function commitLanding(input: CommitLandingInput): CommitLandingResult {
     taskRaw: collectTaskRaw(input.results),
     // 老账没这个字段，新落的都记上：日后用户删了某个标签块，才能反查该重跑谁
     ...(Object.keys(taskTags).length > 0 ? { taskTags } : {}),
+    // 「哪些标签本该进正文」由最终注入模板决定（调用方算好传进来），不是任务抽了什么就要求什么
+    ...(Array.isArray(input.textTagNames) ? { textTagNames: [...input.textTagNames] } : {}),
     complete: true,
   };
 
@@ -333,6 +339,11 @@ export interface EditLandingInput {
   floorId: number;
   landingId: string;
   finalText: string;
+  /**
+   * 账本里「只进字段 / 写进世界书」标签的编辑：标签名 → 新内容。
+   * 空串 = 从账本删掉这个标签。正文里没有这些块，所以不能用删正文块的办法改。
+   */
+  ledgerEdits?: Record<string, string>;
   now: number;
 }
 
@@ -343,7 +354,29 @@ export function editLanding(input: EditLandingInput): { stash: Stash; entry: Sta
   if (index < 0) return null;
 
   const landings = entry.landings.slice();
-  landings[index] = { ...landings[index], finalText: input.finalText };
+  const ledgerEdits = input.ledgerEdits;
+  const savedTags = landings[index].taskTags;
+  if (ledgerEdits && savedTags) {
+    const next: typeof savedTags = {};
+    for (const [taskId, record] of Object.entries(savedTags)) {
+      const tags = { ...(record.tags ?? {}) };
+      const injectOnly = [...(record.injectOnly ?? [])];
+      for (const [name, content] of Object.entries(ledgerEdits)) {
+        if (!Object.prototype.hasOwnProperty.call(tags, name)) continue;
+        if (content === '') {
+          delete tags[name];
+          const at = injectOnly.indexOf(name);
+          if (at >= 0) injectOnly.splice(at, 1);
+        } else {
+          tags[name] = content;
+        }
+      }
+      next[taskId] = { tags, injectOnly };
+    }
+    landings[index] = { ...landings[index], finalText: input.finalText, taskTags: next };
+  } else {
+    landings[index] = { ...landings[index], finalText: input.finalText };
+  }
   const updated: StashEntry = {
     ...entry,
     landings,

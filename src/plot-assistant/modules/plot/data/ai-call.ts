@@ -8,13 +8,19 @@
  * 少传任何一个，任务提示词都会变样（理由写在下面几行注释里）。
  */
 
+import { isPlainObject } from '../guards';
 import type { PlotRoundMessage } from '../eng/engine';
 import type { CustomApiPayload } from '../api-route';
 import { buildTimeoutError, normalizeTimeoutSeconds } from '../eng/call-outcome';
+import type { PlotApiReply } from '../eng/task-accept';
 import { tavernPostProcessing } from './post-processing-host';
 
-/** `generateRaw` 正常返回纯文本；只有传了 `tools` 才可能返回工具调用对象。 */
-type RawGenerateResult = string | { content?: string } | null | undefined;
+/** `generateRaw` 正常返回纯文本；传了 `should_return_reasoning` 或 `tools` 时返回对象。 */
+type RawGenerateResult =
+  | string
+  | { content?: string; reasoning?: string; reasoning_content?: string; [key: string]: unknown }
+  | null
+  | undefined;
 
 export type RawGenerator = (config: Record<string, unknown>) => Promise<RawGenerateResult>;
 
@@ -182,7 +188,7 @@ async function runWithTimeout(
  * 失败一律**原样抛出**：`runTaskAttempts` 判「用户主动中止」靠的是错误对象的 `name`，
  * 包一层 `new Error(...)` 会让中止退化成「接口失败」，白重试三次。
  */
-export async function callPlotApi(messages: PlotRoundMessage[], options: PlotApiCallOptions = {}): Promise<string> {
+export async function callPlotApi(messages: PlotRoundMessage[], options: PlotApiCallOptions = {}): Promise<PlotApiReply> {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error('剧情推进：这次任务没有任何提示词，拒绝发起调用');
   }
@@ -196,6 +202,9 @@ export async function callPlotApi(messages: PlotRoundMessage[], options: PlotApi
     max_chat_history: options.maxChatHistory ?? 0,
     // 静默生成：ACU 的任务调用不占酒馆正常的发送流程，界面上也不该出现「正在输入」。
     should_silence: true,
+    // 酒馆助手 4.11.1+：让 generateRaw 把模型的推理内容一起交回来。
+    // 不传这个键时返回纯文本，reasoning 会被宿主直接吞掉 —— 日志里那块「AI 推理内容」永远是空的。
+    should_return_reasoning: true,
     ordered_prompts: messages.map(message => ({ role: message.role, content: message.content })),
   };
   if (options.generationId) config.generation_id = options.generationId;
@@ -225,13 +234,13 @@ export async function callPlotApi(messages: PlotRoundMessage[], options: PlotApi
     borrow?.release();
   }
 
-  if (typeof result === 'string') return result;
+  if (typeof result === 'string') return { text: result, reasoning: '' };
   // ⚠️ 这里必须判「非空」：宿主开着工具调用/防截断时，正文被搬进 `tool_calls`，
   // 回来的就是 `{ content: '', tool_calls: [...] }`。原版只判 `typeof content === 'string'`
   // 就直接返回空串，于是任务永远被判「回复为空」，而渠道站那边明明每次都成功、回了上百字
   // —— 2026-11-04 用户报的「记忆召回永远没有 AI 回传」就是这个形状。
   if (result && typeof result === 'object' && typeof result.content === 'string' && result.content.trim() !== '') {
-    return result.content;
+    return { text: result.content, reasoning: readReasoning(result) };
   }
 
   // 正文可能不在 content 里，而在**工具调用的参数**里：
@@ -241,7 +250,9 @@ export async function callPlotApi(messages: PlotRoundMessage[], options: PlotApi
   // 我们报「任务回复长度不足」或「aborted-by-stage-failure」（2026-11-02 用户实测）。
   if (result && typeof result === 'object' && !Array.isArray(result)) {
     const carried = textFromToolCalls(result as Record<string, unknown>);
-    if (carried !== null && carried.trim() !== '') return carried;
+    if (carried !== null && carried.trim() !== '') {
+      return { text: carried, reasoning: readReasoning(result as Record<string, unknown>) };
+    }
   }
 
   // 走到这里说明拿到的是个对象，但里面没有 content。
@@ -258,6 +269,14 @@ export async function callPlotApi(messages: PlotRoundMessage[], options: PlotApi
     `剧情推进：任务调用返回的是对象，里面没有正文。拿到的键名：${listed}。` +
       '如果列表里有 tool_calls 或 function_call，说明正文确实在工具调用里，但参数格式没认出来。',
   );
+}
+
+/** 从返回对象里取推理正文：酒馆助手给 `reasoning`，部分渠道用 `reasoning_content`。 */
+function readReasoning(result: Record<string, unknown>): string {
+  const direct = result.reasoning;
+  if (typeof direct === 'string' && direct.trim() !== '') return direct;
+  const alt = result.reasoning_content;
+  return typeof alt === 'string' ? alt : '';
 }
 
 /**
@@ -284,7 +303,7 @@ function pickCarriedText(args: unknown): string | null {
       return raw;
     }
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (!isPlainObject(parsed)) return null;
 
   const record = parsed as Record<string, unknown>;
   const carried = record.content;

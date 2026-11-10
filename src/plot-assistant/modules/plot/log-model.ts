@@ -53,6 +53,8 @@ export interface LogTaskEntry {
   promptMessages?: LogPromptMessage[];
   /** 原始回传（截断到 RAW_KEEP_MAX，避免日志把聊天文件撑大） */
   rawResponse: string;
+  /** 模型推理内容（酒馆 `should_return_reasoning` 返回；老记录没有这一格） */
+  reasoning?: string;
   /** 抽到的标签名 */
   tags: string[];
   /** 只进字段不进正文的标签名 */
@@ -67,7 +69,7 @@ export type LogRoundStatus = 'running' | 'ok' | 'partial' | 'failed';
 
 /** 一轮剧情推进。 */
 export interface LogRound {
-  /** 按用户楼层数算的第几轮 */
+  /** 锚定的用户楼层号（绝对楼层号）；字段沿用旧名，只为兼容旧日志数据 */
   roundIndex: number;
   /** 锚定的用户楼层号 */
   floorId: number;
@@ -91,11 +93,29 @@ export function createLog(): PlotRunLog {
   return { version: 1, rounds: [] };
 }
 
-/** 开一轮。楼层号重复时**替换**旧的那轮（同一层重刷会重开，不该留两条同层记录）。 */
+/**
+ * 开一轮。楼层号重复时**替换**旧的那轮（同一层重刷会重开，不该留两条同层记录）。
+ *
+ * `keepTasks` 用于**断点续跑**：同一楼层再开时保留上一轮已经跑完的任务记录，
+ * 只把本轮新跑的任务追加进去。否则续跑会把前几个任务的日志整条冲掉 ——
+ * 用户 2026-11-09 报的「断点续跑后只看得到最后跑的那个任务」就是这个。
+ *
+ * `rerunTaskIds` 是**这一轮要重跑的任务**：它们上一轮的旧记录要先摘掉，
+ * 否则同一个任务会同时留着「上次失败」和「这次成功」两条，整轮状态会被旧失败拖成 failed。
+ */
 export function startRound(
   log: PlotRunLog,
-  init: { roundIndex: number; floorId: number; presetName: string; startedAt: number },
+  init: {
+    roundIndex: number;
+    floorId: number;
+    presetName: string;
+    startedAt: number;
+    keepTasks?: boolean;
+    rerunTaskIds?: string[];
+  },
 ): { log: PlotRunLog; round: LogRound } {
+  const previous = init.keepTasks === true ? log.rounds.find(r => r.floorId === init.floorId) : undefined;
+  const rerun = new Set((init.rerunTaskIds || []).map(String));
   const round: LogRound = {
     roundIndex: init.roundIndex,
     floorId: init.floorId,
@@ -103,7 +123,7 @@ export function startRound(
     startedAt: init.startedAt,
     endedAt: null,
     status: 'running',
-    tasks: [],
+    tasks: previous ? previous.tasks.filter(task => !rerun.has(task.taskId)) : [],
     error: null,
   };
   const kept = log.rounds.filter(r => r.floorId !== init.floorId);
@@ -151,6 +171,7 @@ export function entryFromResult(
     // 失败时 `rawResponse` 是空串（原版口径：没过验收的正文不进正文），但日志必须留下原文 ——
     // 否则用户只看到「验收失败」，不知道 AI 到底回了什么。
     rawResponse: clip(result.rawResponse || result.lastRawResponse || '', RAW_KEEP_MAX),
+    reasoning: clip(result.reasoning || '', RAW_KEEP_MAX),
     tags: Object.keys(result.extractedTags || {}),
     injectOnlyTags: [...(result.injectOnlyTagNames || [])],
     startedAt: meta.startedAt,
@@ -226,7 +247,7 @@ export function toMarkdown(log: PlotRunLog): string {
 
   for (const round of [...log.rounds].sort((a, b) => b.floorId - a.floorId)) {
     const badge = round.status === 'ok' ? '✅' : round.status === 'running' ? '⏳' : '❌';
-    lines.push(`## ${badge} 第 ${round.roundIndex} 轮（楼层 ${round.floorId}）`);
+    lines.push(`## ${badge} 第 ${round.floorId} 楼`);
     lines.push('');
     lines.push(`- 预设：${round.presetName || '（未记录）'}`);
     lines.push(`- 开始：${stamp(round.startedAt)}　结束：${round.endedAt ? stamp(round.endedAt) : '未结束'}`);
@@ -264,6 +285,9 @@ export function toMarkdown(log: PlotRunLog): string {
         });
       } else if (task.promptPreview) {
         lines.push('', '<details><summary>提示词预览</summary>', '', '```', task.promptPreview, '```', '', '</details>');
+      }
+      if (task.reasoning) {
+        lines.push('', '<details><summary>AI 推理内容</summary>', '', '```', task.reasoning, '```', '', '</details>');
       }
       lines.push('', '<details><summary>原始回传</summary>', '', '```', task.rawResponse || '（空）', '```', '', '</details>', '');
     }

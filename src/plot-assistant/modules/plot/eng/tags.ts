@@ -145,7 +145,7 @@ export function extractTaskTags(text: string, extractTags: string, extractInject
   for (const tagName of injectTagNames) {
     const content = extractLastTag(text, tagName);
     if (content === null) continue;
-    const fragment = `<${tagName}>${content}</${tagName}>`;
+    const fragment = buildTagBlock(tagName, content);
     injectOnlyTags[tagName] = content;
     injectOnlyFragments.push(fragment);
     injectOnlyTagNames.push(tagName);
@@ -159,7 +159,7 @@ export function extractTaskTags(text: string, extractTags: string, extractInject
     const content = extractLastTag(text, tagName);
     if (content === null) continue;
     extractedTags[tagName] = content;
-    injectedFragments.push(`<${tagName}>${content}</${tagName}>`);
+    injectedFragments.push(buildTagBlock(tagName, content));
   }
 
   return {
@@ -249,10 +249,53 @@ export function buildTagBlock(tagName: string, contents: TagValue): string {
   const normalizedTagName = String(tagName || '').trim();
   if (!normalizedTagName) return '';
 
-  const list = (Array.isArray(contents) ? contents : [contents]).map((content) => content ?? '');
+  const list = (Array.isArray(contents) ? contents : [contents]).map((content) => ensureTableBodyNewline(content ?? ''));
   if (!list.length) return '';
 
   return `<${normalizedTagName}>${list.join('\n\n')}</${normalizedTagName}>`;
+}
+
+/**
+ * 表格类标签内容如果紧贴着开标签（`<tag>| 表头 |`），补一个换行再拼。
+ *
+ * AI 有时会省掉开标签后的换行；这里只在「内容以竖线开头」时补，
+ * 不碰普通正文，也不把已经有的换行再加一遍。
+ */
+function ensureTableBodyNewline(content: string): string {
+  if (content === '') return content;
+  if (content.startsWith('\n') || content.startsWith('\r')) return content;
+  return /^[ \t]*\|/.test(content) ? `\n${content}` : content;
+}
+
+/**
+ * 把一段完整回传里「开标签后紧跟表格」的地方统一补一个换行。
+ *
+ * 用于兜底正文（没有聚合标签、直接把任务原文拼进 <plot> 的那条路）；
+ * 只动开标签与表格之间，不动标签内部其它换行，也不改标签名。
+ */
+export function normalizeTagBlockNewlines(text: string): string {
+  return String(text ?? '').replace(/(<([A-Za-z_][\w-]*)>)(?=[ \t]*\|)/g, '$1\n');
+}
+
+/**
+ * 把「两个尖角标签紧贴、中间没有换行」的地方补一个换行。
+ *
+ * 标签独占一行才是最不含糊的边界表达：按行扫的前端 / 解析器靠「这一行
+ * 只有标签」认层级，贴在一起就得靠猜括号配对。用户 2026-11-09 定的口径
+ * 是三种紧贴都补：开-开（左为父）、闭-闭（右为父）让父标签正确包住子标签；
+ * 闭-开（相互独立的标签并排）让右边那个换到下一行。
+ * 同一对的空标签（`<a></a>`）不是两个独立标签，不动；标签内部文字、
+ * 已有换行也不动，不会重复补。
+ */
+export function normalizeAdjacentTagNewlines(text: string): string {
+  const source = String(text ?? '');
+  return source
+    // 开标签紧贴开标签：靠左的是父（<父><子>…</子></父>）
+    .replace(/(<[A-Za-z_][\w-]*>)(?=<[A-Za-z_][\w-]*>)/g, '$1\n')
+    // 闭标签紧贴闭标签：靠右的是父
+    .replace(/(<\/[A-Za-z_][\w-]*>)(?=<\/[A-Za-z_][\w-]*>)/g, '$1\n')
+    // 相互独立的标签并排：右边那个换到下一行，让每个标签独占一行
+    .replace(/(<\/[A-Za-z_][\w-]*>)(?=<[A-Za-z_][\w-]*>)/g, '$1\n');
 }
 
 /** 内容里有没有「非空白」的实质东西。 */

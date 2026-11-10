@@ -23,20 +23,20 @@ import { pickSummaryIndexEntry } from './eng/data-format';
 import { buildHistoryDigest, pickHistoryMessages } from './eng/history';
 import { applyContextTagFilters } from './eng/context-tags';
 import { getPlotFromHistory } from './eng/history-plot';
-import { normalizeRound } from './eng/schedule';
-import type { PlotTaskResult } from './eng/assemble';
+import { collectDirectiveTagNames, type PlotTaskResult } from './eng/assemble';
 import type { TaskProgressInfo } from './eng/engine';
 import { makeRoundId } from './eng/writeback';
 import type { PlotTask } from './eng/task-model';
-import { readPresetPlaceholders } from './preset-edit';
-import { advanceRoundIndex, pruneTaskRuns, readTaskLastRound, writeTaskRuns } from './round-book';
+import { anchorNameOf, readAnchorGap, type AnchorFloor } from './floor-anchor';
 import { runPlotRoundForPreset } from './round';
+import { presetImportOptions } from './preset-options';
 import { commitLanding, commitProgress, planStashRun } from './stash-flow';
-import { attachLandingsToChat, type Stash, type StashWorking } from './stash-model';
+import { attachLandingsToChat, collectStashTagMap, type Stash, type StashWorking } from './stash-model';
 import { createLogWriter } from './log-flow';
 import { resolveChatStateStore } from './data/chat-vars';
 import { resolveChatKey } from './chat-key';
-import { saveSettings } from '../settings';
+import { enqueueWorldbookCheck, enqueueWorldbookLanding } from './worldbook-write';
+import { processTavernTemplateText, readRoundIdentity, substituteTavernMacros } from '../tavern';
 import { resolveWorldbookBooks, type WorldbookPick } from './worldbook-select';
 
 /** 这一轮锚在哪个楼层。用户发一条消息就是一个锚点，暂存账按它记。 */
@@ -61,6 +61,8 @@ export interface PlotCommit {
   presetName: string;
   roundId: string;
   taskResults: PlotTaskResult[];
+  /** 这一轮真跑过的任务的锚点名，楼层落地后由 after-send 补写（空的就不写）。 */
+  anchorNames: string[];
 }
 
 export interface PlotAppendResult {
@@ -90,9 +92,10 @@ interface RawTavernMessage {
   extra?: Record<string, unknown>;
 }
 
-function toPlotMessage(raw: RawTavernMessage): Record<string, unknown> {
+/** 聊天楼层 → 渲染层认识的样子；预览也 import 这一个，别再各写一份。 */
+export function toPlotMessage(raw: { role?: unknown; message?: unknown; extra?: unknown }): Record<string, unknown> {
   return {
-    ...(raw.extra ?? {}),
+    ...((raw.extra as Record<string, unknown> | undefined) ?? {}),
     is_user: raw.role === 'user',
     mes: raw.message,
   };
@@ -172,10 +175,19 @@ export async function appendPlotBlock(
     join?: 'append' | 'final';
     /** 每个任务开跑前回调一次（等待气泡用它显示进度） */
     onTaskStart?: (info: TaskProgressInfo) => void;
+    /** 每个任务跑完回调一次（成功或失败都调；等待气泡用它把任务标成完成/失败） */
+    onTaskSettled?: (result: PlotTaskResult) => void;
   } = {},
 ): Promise<PlotAppendResult> {
   const plotSettings = ctx.settings.plot;
   if (!plotSettings.enabled) return { ok: false, text: userText, note: '剧情推进未开启' };
+
+  // ── 世界书写入：开跑前对一次账（2026-11-07 批 36/37）──
+  //
+  // 聊天 / 角色卡换了就按当前账本重算（清托管条目 + 重放）。比对键没变时它不会动
+  // 世界书（没有要改的条目就直接短路）。托管条目本来就被挡在 `$1` 之外，
+  // 所以它与本轮读世界书并发也互不干扰。后台排队跑，不阻塞推进。
+  enqueueWorldbookCheck(ctx);
 
   // ── 预设从哪来：先看本地库（导入过的），没有再实时读数据库脚本 ──
   //
@@ -197,30 +209,30 @@ export async function appendPlotBlock(
     preset = presetOutcome.details as Record<string, unknown>;
   }
 
-  const config = importPresetConfig(preset);
-  const historyLimit = Math.max(1, config.contextTurnCount);
+  const presetOptions = presetImportOptions(plotSettings);
+  const config = importPresetConfig(preset, presetOptions);
+  const historyLimit = Math.max(0, config.contextTurnCount);
 
-  // ── 触发轮次 + 强度/召回：都从预设本体读 ──
+  // ── 触发间隔：这条用户楼层，每个任务距自己上一次锚点隔了几条 ──
   //
-  // 轮号 = 已经跑过的轮数 + 1。`roundIndex` 是脚本设置里的计数，跟着这次对话往下数。
+  // 数的是「第几条用户楼层」，不是绝对楼层号：AI 回复不算、被隐藏的用户楼层算。
+  // 锚点由每个任务各自记在跑过的那条楼层的 extra 里（见 plot/floor-anchor.ts），
+  // 所以删层重刷时锚点跟着楼层消失、换聊天自动各算各的，不需要全局账本。
   //
-  // 账本的键用**用户选的那个名字**（本地库里存的名字），不是预设内部写的 `name`：
-  // 用户在编辑器里改了名，账要跟着「这个预设」走，不能因为改名字就把周期重置一遍。
-  const round = normalizeRound(plotSettings.roundIndex + 1);
+  // 锚点名带预设名，防止不同预设里同名同序号的任务串账；用本地库里存的名字
+  // （用户选的那个），不是预设内部写的 name —— 用户在编辑器里改了名，锚点也跟着走。
   const presetKey = stored ? stored.name : config.name;
-  const lastRoundOf = (taskId: string) => readTaskLastRound(plotSettings.taskRuns, presetKey, taskId);
 
-  // 强度四档与召回条数：上游是 `plotSettings.rateMain/ratePersonal/rateErotic/rateCuckold`
-  // 与 `recallCount` 直接进占位符表（`plot-task-engine.ts:387-392`）。
-  //
-  // 走 `readPresetPlaceholders` 而不是 `readPresetDraft`：这几项界面上已经没有输入框了
-  // （它们是兼容字段，召回多少条由提示词自己说），但仍然要按「预设里有就用、没有就用默认」
-  // 算出一个数，否则提示词里的 `{{zhaohui}}` / `{{sulv1}}` 会被替换成空串。
-  const placeholders = readPresetPlaceholders(preset);
-
-  // ── 聊天记录：一份给 `$7` 摘要、一份给 `$6` 上一轮 ──
+  // ── 聊天记录：一份给 `$7` 摘要、一份给 `$6` 上一轮、一份数触发间隔 ──
   const rawChat = getChatMessages('0-{{lastMessageId}}') as unknown as RawTavernMessage[];
   const chat = rawChat.map(toPlotMessage);
+  const taskAnchorNames = new Map<string, string>(
+    config.tasks.map(task => [task.id, anchorNameOf(presetKey, task.id)]),
+  );
+  const lastAnchorGapOf = (taskId: string): number | null =>
+    readAnchorGap(rawChat as AnchorFloor[], taskAnchorNames.get(taskId) ?? '');
+  // 日志按绝对楼层号标识：roundIndex 字段沿用旧名，值取这一轮锚定的楼层号。
+  const round = options.floor?.messageId ?? -1;
 
   // ── 暂存：这一层之前有没有没跑完的账 ──
   //
@@ -258,7 +270,8 @@ export async function appendPlotBlock(
   // 进度写照：每跑完一个任务落一次盘。一次推进可能跑十几分钟，
   // 中途关页面、切聊天、脚本重载，内存里那份就没了 —— 写一次只是一次变量补丁。
   let plannedIds: string[] = [];
-  const settled: PlotTaskResult[] = [];  const flushProgress = (): void => {
+  const settled: PlotTaskResult[] = [];
+  const flushProgress = (): void => {
     if (!useStash || !anchor || plannedIds.length === 0) return;
     try {
       const next = commitProgress({
@@ -290,7 +303,6 @@ export async function appendPlotBlock(
   const historyDigest = buildHistoryDigest(
     pickHistoryMessages(
       chat,
-      userText,
       historyLimit,
       (content) =>
         applyContextTagFilters(String(content ?? ''), {
@@ -301,10 +313,14 @@ export async function appendPlotBlock(
     ),
   );
   const previousPlot = getPlotFromHistory(historyChat, {}, config.name);
-  const recentText = rawChat
-    .slice(-historyLimit)
+  // `{{标签}}` 的主来源：暂存区账本里上一轮的标签投影（qrf 模式没有账本，退回上一楼层正文）。
+  const stashHistoryTags = useStash ? collectStashTagMap(stash) : null;
+  const recentText = (historyLimit === 0 ? [] : rawChat.slice(-historyLimit))
     .map((item) => String(item.message ?? ''))
     .join('\n');
+
+  // `$U` / `$C`：从宿主窗口取用户人设与当前角色卡描述，取不到给空串。
+  const identity = readRoundIdentity();
 
   // ── 世界书：`$1` 全量、`$9` 剔掉数据库生成条目、`$5` 的纪要索引 ──
   //
@@ -349,44 +365,59 @@ export async function appendPlotBlock(
     const outcome = await runPlotRoundForPreset({
       preset,
       previousPlot,
+      stashHistoryTags,
       worldbookContent: worldbook.content,
       worldbookDatabaseExcluded: worldbook.contentExcludingDatabase,
-      round,
-      lastRoundOf,
+      gapOf: lastAnchorGapOf,
       working,
       // 引擎在发第一个请求之前会告诉我们「这一轮本来打算跑谁」——没有它就算不出还欠几个任务
       onRoundPlanned: (tasks: PlotTask[]) => {
         plannedIds = tasks.map((task) => task.id);
         // 真要跑了才开轮：空轮不该占日志的一格
         if (tasks.length > 0) {
-          logWriter?.start({ floorId: anchor ? anchor.messageId : -1, roundIndex: round, presetName: presetKey });
+          // 续跑时保留上一轮已经跑完的任务记录：否则日志里只剩最后这一批，
+          // 用户看不到前半场是谁跑完的、跑了什么（2026-11-09 第 7 条）。
+          logWriter?.start({
+            floorId: anchor ? anchor.messageId : -1,
+            roundIndex: round,
+            presetName: presetKey,
+            resume: Boolean(working),
+            // 这一轮要重跑的任务，上一轮的旧失败记录先摘掉；否则同一条任务
+            // 会同时留着旧 failed 和新 ok，整轮状态被旧失败拖成 failed。
+            rerunTaskIds: plannedIds,
+          });
         }
       },
       // 每跑完一个任务落一次盘：成功后失败时都靠它续跑
       onTaskSettled: (result) => {
         if (result && typeof result.taskId === 'string' && result.taskId) settled.push(result);
         flushProgress();
+        // 气泡要把「这个任务跑完了」画出来；回调失败不能连累推进。
+        try {
+          options.onTaskSettled?.(result);
+        } catch (error) {
+          console.warn('[剧情推进助手] 任务完成回调失败', error);
+        }
       },
       // 日志与暂存分开：日志写坏了只是少一份记录，不能让这一轮的进度跟着丢
       onTaskLog: (info) => {
         logWriter?.task(info);
       },
       onTaskStart: options.onTaskStart,
+      importOptions: presetOptions,
       replacements: {
+        ...identity,
         worldbookContent: worldbook.content,
         worldbookDatabaseExcluded: worldbook.contentExcludingDatabase,
         summaryIndex,
         historyDigest,
         previousPlot,
         userInput: userText,
-        strengths: {
-          sulv1: placeholders.sulv1,
-          sulv2: placeholders.sulv2,
-          sulv3: placeholders.sulv3,
-          sulv4: placeholders.sulv4,
-        },
-        zhaohui: placeholders.zhaohui,
       },
+      // 酒馆原生宏（<user> / {{user}} / <char> / {{char}} …）统一在渲染层换掉；
+      // templateProcess 额外接入酒馆正则、MacroLike 与 EJS 模板。
+      macroReplace: substituteTavernMacros,
+      templateProcess: processTavernTemplateText,
       callApi: (messages, task) => {
         // 任务级 API：任务自己指了名字就用那条，没指（空）就跟面板上「当前 API」走。
         // 指的那条被删了/改名了就回落到当前那条 —— 跑得下去比跑得「严格」重要，
@@ -416,15 +447,19 @@ export async function appendPlotBlock(
     if (!outcome.ok) {
       // 真的开始跑了却没跑完：留在原地等用户再点一次（下一次会接着这几个欠账跑）。
       flushProgress();
-      logWriter?.finish(`剧情推进未完成（${outcome.reason}）`);
-      return { ok: false, text: userText, note: `剧情推进未完成（${outcome.reason}）`, blocking: true };
+      const reasonText =
+        outcome.reason === 'unsupported-legacy-preset'
+          ? '这份预设是老格式（正文只写在 mainPrompt / systemPrompt 或 prompts 三段里，没有任务表），本版本已不再支持；请改用带「任务清单」的预设'
+          : outcome.reason;
+      logWriter?.finish(`剧情推进未完成（${reasonText}）`);
+      return { ok: false, text: userText, note: `剧情推进未完成（${reasonText}）`, blocking: true };
     }
 
     // ── 记账：哪些任务这一轮真的跑了 ──
     //
-    // 只在**成功**分支记账并推进轮号：失败的那一轮用户会重刷，重刷应该还算同一轮。
-    // 轮号一前进，「每 3 轮」的任务就会因为差了一轮而晚跑一次。
-    persistRoundBook(ctx, presetKey, outcome.ranTaskIds, round);
+    // 锚点不在这里写：这时楼层还没发出去。要交回给动作层，等楼层真的落地后
+    // 由 after-send 把锚点补写在楼层 extra 上（升级模式也要写）。失败的一轮
+    // 没有 commit，自然不会打锚点；删层重刷会把锚点一起删掉。
 
     // 一个任务都没跑（全停用、这一轮都没到期、或者提示词块全关了）：
     // 原样放行，别往输入框后面拼一个空块。
@@ -432,7 +467,7 @@ export async function appendPlotBlock(
       return {
         ok: true,
         text: userText,
-        note: `本轮没有任务要跑（${describeSkipped(outcome.skippedBySchedule, outcome.skippedNoPrompt.length)}）`,
+        note: `这条楼层没有任务要跑（${describeSkipped(outcome.skippedBySchedule, outcome.skippedNoPrompt.length)}）`,
       };
     }
 
@@ -454,6 +489,9 @@ export async function appendPlotBlock(
             finalText: outcome.finalMessage,
             saveContent: outcome.saveContent,
             results: settled,
+            // 哪些标签「本该进正文」由最终注入模板决定，不是由任务抽了哪些决定。
+            // 用户把某些标签从模板里删掉后，它们只该存档/进世界书，不该被当成暂存缺口。
+            textTagNames: collectDirectiveTagNames(config.directiveTemplate),
             now: Date.now(),
           });
           stash = landed.stash;
@@ -469,11 +507,20 @@ export async function appendPlotBlock(
         presetName: outcome.presetName || presetKey,
         roundId: makeRoundId(),
         taskResults: settled.slice(),
+        anchorNames: outcome.ranTaskIds
+          .map((id) => taskAnchorNames.get(id))
+          .filter((name): name is string => Boolean(name)),
       };
     }
 
     // 整轮跑完（没失败任务）才收尾；日志写的是「这一轮的结果」，与暂存是否写成功无关。
     logWriter?.finish(null);
+
+    // ── 世界书写入（2026-11-07 批 36/37）：落盘后把规则选中的标签块写进世界书 ──
+    //
+    // 用引擎聚合出的**完整**标签表（含续跑时从账本补齐的上半场），不是只看本轮结果 ——
+    // 分两次跑完的一轮，落盘成果里两个半场的标签都算数。后台排队写，不阻塞返回。
+    enqueueWorldbookLanding(ctx, outcome.outcome.aggregatedTags);
 
     // 楼层正文写什么，由调用方决定：
     // - 手势重刷沿用「原文 + 空行 + 指令块」，用户回头还能看见自己说了什么；
@@ -490,35 +537,6 @@ export async function appendPlotBlock(
   }
 }
 
-/**
- * 把这一轮的账写回脚本设置：记「哪些任务在第几轮跑过」+ 轮号前进。
- *
- * 用 `saveSettings` 而不是自己 `replaceVariables`：设置只有一个写入口
- * （`forStorage` 的 API 密钥混淆、zod 形状都归它管），绕过去早晚会把密钥写成明文。
- *
- * 顺带清掉已经不存在的预设的账 —— 用户删掉预设后，那几条账永远不会再被读到，
- * 留在变量里只会让对象越攒越大。
- */
-function persistRoundBook(
-  ctx: RerushContext,
-  presetName: string,
-  ranTaskIds: string[],
-  round: number,
-): void {
-  const plot = ctx.settings.plot;
-  const book = writeTaskRuns(plot.taskRuns, presetName, ranTaskIds, round);
-  const kept = pruneTaskRuns(
-    book,
-    plot.presets.map((item) => item.name),
-  );
-  saveSettings(ctx, {
-    plot: {
-      ...plot,
-      roundIndex: advanceRoundIndex(plot.roundIndex),
-      taskRuns: kept,
-    },
-  });
-}
 
 /** 当前聊天的稳定标识 —— 见 `plot/chat-key.ts`（面板也要用同一份，所以搬出去了）。 */
 function chatKeyOf(ctx: RerushContext): string {
@@ -530,7 +548,7 @@ function describeSkipped(skipped: { taskId: string; reason: string }[], emptyPro
   const parts: string[] = [];
   const notDue = skipped.filter((item) => item.reason === 'not_due').length;
   const disabled = skipped.filter((item) => item.reason === 'disabled').length;
-  if (notDue > 0) parts.push(`${notDue} 个还没到轮次`);
+  if (notDue > 0) parts.push(`${notDue} 个还没到楼层间隔`);
   if (disabled > 0) parts.push(`${disabled} 个已停用`);
   if (emptyPromptCount > 0) parts.push(`${emptyPromptCount} 个提示词块全关了`);
   if (parts.length) return parts.join('，');

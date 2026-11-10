@@ -7,12 +7,12 @@
  * 不读存储、不碰数据库脚本 —— 写回磁盘是外层点「应用修改」之后的事。
  *
  * 这里只放**真正会生效**的字段：名称、最终注入指令、标签差量表。
- * 召回条数、四个强度、预设级最短长度、预设级标签串**一个都没有**：它们要么只是填进
- * 提示词的占位符数字，要么只在「预设里没有任务表」的兜底路径里被读。摆出来就是骗人，
- * 见 `COMPAT_PLACEHOLDER_DEFAULTS`。
+ * 旧格式兜底字段（预设级最短长度、预设级标签串等）一个都没有：它们只在「预设里没有
+ * 任务表」的兜底路径里被读，摆出来就是骗人。
  */
 import { computed } from 'vue';
 import { UI } from '../copy';
+import { normalizeTagDiffMode } from '../plot/eng/tag-diff';
 import type { PresetDraft, TaskDraft } from '../plot/preset-edit';
 
 const props = defineProps<{
@@ -35,7 +35,7 @@ const knownTags = computed<string[]>(() => {
   };
 
   for (const task of props.tasks ?? []) {
-    for (const raw of [task.extractTags, task.extractInjectTags]) {
+    for (const raw of [task.extractTags, task.extractInjectTags, task.exemptTags]) {
       for (const name of String(raw ?? '').split(',')) push(name);
     }
   }
@@ -55,9 +55,10 @@ function modeOf(tag: string): string {
 }
 
 function setMode(tag: string, value: string): void {
+  const mode = normalizeTagDiffMode(value);
   if (!props.draft.tagDiffModes) props.draft.tagDiffModes = {};
-  if (value === 'keep' || value === 'blocks' || value === 'table') props.draft.tagDiffModes[tag] = value;
-  else delete props.draft.tagDiffModes[tag];
+  if (mode === 'off') delete props.draft.tagDiffModes[tag];
+  else props.draft.tagDiffModes[tag] = mode;
 }
 </script>
 

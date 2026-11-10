@@ -29,6 +29,7 @@
  */
 
 import { parse as parseYamlText, stringify as stringifyYamlText } from 'yaml';
+import { isPlainObject } from './guards';
 
 /** 解析结果。`value === null` 表示「这格是空的」，不是失败。 */
 export interface BodyParamsResult {
@@ -37,11 +38,6 @@ export interface BodyParamsResult {
   value: Record<string, unknown> | null;
   /** 失败时：说清哪一段不对，直接能显示给用户。 */
   error: string;
-}
-
-/** 是不是一个「键值表」—— 数组、null、标量都不算。 */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**

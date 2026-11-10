@@ -1,0 +1,264 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   手机 / 窄窗：功能列收成抽屉，卡片吃满屏幕，横向一行挤不下的改竖排
+   ══════════════════════════════════════════════════════════════════════════
+   为什么要有这一段：手机上 96vw ≈ 360px，左侧固定 108px 的功能列一占，
+   内容区只剩两百多像素 —— 提示词块只剩「提示…」四个字，按钮挤成一堆。
+   这里不改数据也不改结构，只改「多窄的时候怎么摆」。
+*/
+
+/* 三横线按钮：宽屏不出现，窄屏才出现（见下面的媒体查询） */
+.rh-burger {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0 6px;
+  border: 1px solid var(--rh-line-input) !important;
+  border-radius: 8px !important;
+  background-color: transparent !important;
+  cursor: pointer;
+}
+
+.rh-burger-bar {
+  display: block;
+  height: 2px;
+  border-radius: 1px;
+  background-color: var(--rh-fg-soft) !important;
+}
+
+/* 星空神庙：三横线换成星光蓝，按钮框加一圈白晕。其他主题一个字不动。 */
+.rh-mask[data-rh-theme="starry-temple"] .rh-burger {
+  border-color: rgba(255, 255, 255, 0.6) !important;
+  background-color: rgba(16, 24, 56, 0.42) !important;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.3),
+    0 0 12px rgba(120, 180, 255, 0.55),
+    inset 0 0 10px rgba(120, 180, 255, 0.35) !important;
+}
+
+.rh-mask[data-rh-theme="starry-temple"] .rh-burger:hover {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.45),
+    0 0 18px rgba(140, 195, 255, 0.85),
+    inset 0 0 12px rgba(140, 195, 255, 0.5) !important;
+}
+
+.rh-mask[data-rh-theme="starry-temple"] .rh-burger-bar {
+  background-color: transparent !important;
+  background-image: linear-gradient(90deg, #ffffff 0%, #a9d8ff 50%, #6fa8ff 100%) !important;
+  box-shadow:
+    0 0 6px rgba(150, 205, 255, 0.95),
+    0 0 2px rgba(255, 255, 255, 0.9) !important;
+}
+
+.rh-rail-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background-color: rgba(0, 0, 0, 0.32);
+}
+
+@media (max-width: 720px) {
+  .rh-mask {
+    padding: 0 !important;
+    align-items: stretch !important;
+    justify-content: stretch !important;
+  }
+
+  .rh-card {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-height: 100vh !important;
+    max-height: 100dvh !important;
+    border: none !important;
+    border-radius: 0 !important;
+    position: relative !important;
+  }
+
+  /* 块卡片那排工具条：宽屏为了「开关和删除别掉到第二行」用了 nowrap，
+     但手机上 390px 放不下 8 个控件，右边几个（开关、删除）会被直接挤出可视区 ——
+     用户实测「手机上根本看不到开关」。窄屏改成可换行，删除也不再靠 margin-left:auto 顶到最右。 */
+  .rh-card .acu-prompt-group__toolbar {
+    flex-wrap: wrap !important;
+  }
+
+  .rh-card .acu-prompt-group__delete {
+    margin-left: 0 !important;
+  }
+
+  .rh-card-head {
+    gap: 8px !important;
+    padding: 10px 12px 8px !important;
+  }
+
+  .rh-burger {
+    display: flex !important;
+  }
+
+  .rh-card-title {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    font-size: 15px !important;
+  }
+
+  /* 功能列变左侧抽屉：默认整体挪到屏幕外，露出时盖在内容上 */
+  .rh-rail {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    z-index: 4 !important;
+    width: 168px !important;
+    max-width: 70vw !important;
+    transform: translateX(-102%);
+    transition: transform 0.18s ease;
+  }
+
+  .rh-rail.open {
+    transform: none;
+  }
+
+  .rh-body-wrap {
+    position: relative !important;
+  }
+
+  .rh-card-body {
+    padding: 10px 12px 16px !important;
+  }
+
+  /* 一行「标题 + 输入框 + 单位」在窄屏竖着摆，标题另起一行 */
+  .rh-line {
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+  }
+
+  .rh-line label {
+    flex: 1 1 100% !important;
+  }
+
+  .rh-card .acu-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    flex-wrap: wrap !important;
+  }
+
+  .rh-card .acu-row--inline {
+    flex-wrap: wrap !important;
+  }
+
+  /*
+    暂存区顶部这一行是例外：标题 + 导出/导入/刷新必须横着排（2026-11-09 第 1 条）。
+    上面那条把 .acu-row 全改成竖排，这里用同类名 + 更靠后的位置把它掰回来。
+  */
+  .rh-card .acu-stash-head {
+    flex-direction: row !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+    gap: 8px !important;
+  }
+
+  .rh-card .acu-stash-actions {
+    flex-direction: row !important;
+    align-items: center !important;
+    flex-wrap: wrap !important;
+    justify-content: flex-end !important;
+    width: auto !important;
+    gap: 8px !important;
+  }
+
+  .rh-card .acu-stash-actions > * {
+    flex: 0 0 auto !important;
+    align-self: center !important;
+    width: auto !important;
+  }
+
+  /*
+    窄屏下「一行」全部改成竖排后，子元素身上那些 `flex: 1 1 120px` 会变成
+    「高度 120px」——输入框会鼓成一个两百像素高的方块，名字只剩底部一行。
+    这里把子元素的伸缩基础清掉，让高度重新由内容决定。
+  */
+  .rh-card .acu-row > * {
+    flex: 0 0 auto !important;
+  }
+
+  .rh-card .acu-input,
+  .rh-card .acu-select {
+    height: auto !important;
+    min-height: 32px !important;
+  }
+
+  /*
+    竖排之后 `align-items: stretch` 会把按钮也拉成整行宽 —— 一个「✕」变成一条粉色长条。
+    按钮按内容宽就好，靠左对齐。
+  */
+  .rh-card .acu-row > .acu-btn,
+  .rh-card .acu-row > button {
+    align-self: flex-start !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+  }
+
+  /* 控制类按钮（开关行里的）本来就该占满，别被上面那条误伤 */
+  .rh-card .acu-row > .acu-btn.primary,
+  .rh-card .acu-row > .acu-btn.acu-btn--block {
+    align-self: stretch !important;
+  }
+
+  /* 页脚是粘在底部的，正文最后一段否则会被它压住 */
+  .rh-card-body {
+    padding-bottom: 78px !important;
+  }
+
+  /* 长标签（「这个任务的最终指令」）压到一行会变成「这个任务…」，逼它换行 */
+  .rh-card .rh-field-label,
+  .rh-card .acu-row label {
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+  }
+
+  /*
+    窄屏五页签：等宽 + 小字号 + 单行不换行。
+    上一版靠横向滚动，结果「世界书与上下文」在 390px 里折成三行，比滚动更难认。
+  */
+  .rh-card .acu-page-tabs {
+    gap: 2px !important;
+    padding: 6px 6px !important;
+  }
+
+  .rh-card .acu-page-tab {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    padding: 8px 2px !important;
+    font-size: 11px !important;
+    line-height: 1.25 !important;
+    white-space: nowrap !important;
+  }
+
+  /* 窄屏换短名（工作流助手同一招：全名隐藏、短名显示） */
+  .rh-card .acu-page-tab__full {
+    display: none !important;
+  }
+
+  .rh-card .acu-page-tab__short {
+    display: inline !important;
+  }
+
+  .acu-stash-dialog,
+  .rh-card .acu-preview {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+  }
+
+  .acu-stash-tagrow {
+    flex-wrap: wrap !important;
+  }
+}
+

@@ -1,0 +1,224 @@
+
+/* ══════════════════════════════════════════════════════════════════════════
+   隔离层：本面板必须自包含 —— 外观只由这份样式决定，不受酒馆主题与任何美化影响。
+
+   污染不是假想，酒馆自带 public/style.css 里就有若干条会直接命中面板元素：
+     · 135 行  * { text-shadow: 0 0 calc(var(--shadowWidth)*1px) var(--SmartThemeShadowColor) }
+                —— 命中面板内每一个元素；主题把阴影色改亮或宽度调大，文字就发虚发花
+     · 150 行  body { font-family: var(--mainFontFamily); font-size: var(--mainFontSize);
+                       color: var(--SmartThemeBodyColor) }        —— 沿继承链渗进来
+     · 1566 行 input, select, button { font-family/font-size/color: 主题变量 }
+     · 1544 行 textarea { background-color: var(--black30a); border/color: 主题变量 }
+     · 3039 行 select { background-color: var(--black30a); appearance: none;
+                        background-image: url('/img/down-arrow.svg') }
+     · 3055 行 select option { background-color: var(--white50a); color: var(--black70a) }
+     · 701 行  code { font-family: var(--monoFontFamily); border/background/color: 主题变量 }
+     · 2612 行 textarea::placeholder
+     · 170 行起 ::-webkit-scrollbar
+
+   这些是**直接命中**而非继承，所以既要给面板根做继承断点，也要在控件上逐项钉死。
+   又因为主题作者（尤其美化包）普遍用 !important，本文件对“颜色 / 背景 / 边框 / 阴影 /
+   字体族”一律带 !important；同为 !important 时靠选择器特异性与书写顺序决胜，
+   因此隔离层一律用 :where() 包裹（特异性 0）并写在本文件最前，
+   面板自己的规则（特异性 ≥ 0,1,0 且写在后面）随时可以覆盖它。
+
+   面板内所有色值都是本文件写死的字面量（集中在下面 --rh-* 令牌里），
+   不引用 --SmartTheme* / --mainFontFamily 之类的任何酒馆变量。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.rh-mask {
+  /* —— 面板内部配色令牌（唯一来源；外界同名变量也会被这里的就近声明盖住）—— */
+  --rh-fg: #1b2330;
+  --rh-fg-soft: #3a4657;
+  --rh-fg-dim: #616b79;
+  --rh-fg-faint: #8b93a4;
+  --rh-bg: #fbfbfd;
+  --rh-bg-soft: #f4f6f9;
+  --rh-bg-pure: #fefeff;
+  --rh-line: #dfe3ea;
+  --rh-line-soft: #e8eaef;
+  --rh-line-input: #ccd2dc;
+  --rh-accent: #7c3aed;
+  --rh-accent-deep: #6a2fd1;
+  --rh-accent-wash: #f3eefe;
+  --rh-accent-wash-soft: #f7f3fe;
+  --rh-danger: #b42318;
+  --rh-ok: #15803d;
+  --rh-ok-wash: #f2fbf5;
+  --rh-scrim: rgba(16, 18, 27, 0.55);
+  --rh-shadow: rgba(16, 18, 27, 0.35);
+  --rh-thumb: #c3c8d2;
+  --rh-bg-hover: #edeff3;
+  --rh-fg-mid: #4d5765;
+  --rh-line-dashed: #bfc4d0;
+  --rh-card-edge: rgba(38, 48, 63, 0.1);
+  --rh-accent-ring: rgba(124, 58, 237, 0.12);
+  --rh-accent-selection: rgba(124, 58, 237, 0.28);
+  --rh-scrim-btn: rgba(27, 35, 48, 0.4);
+  --rh-ok-ring: rgba(22, 163, 74, 0.18);
+  --rh-ok-glow-faint: rgba(22, 163, 74, 0.05);
+  --rh-ok-glow-strong: rgba(22, 163, 74, 0.35);
+  --rh-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', sans-serif;
+  --rh-font-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'SFMono-Regular', Menlo, monospace;
+
+  /* —— 蒙层布局 —— */
+  position: fixed !important;
+  inset: 0 !important;
+  /*
+    蒙层自身规定高度：它有 backdrop-filter，会变成后代 position: fixed 的「参照物」，
+    高度塌成 0 时里面的弹窗会被压成一条缝。这里直接按视口钉死，别依赖 inset 推算。
+  */
+  height: 100vh !important;
+  height: 100dvh !important;
+  z-index: 99999 !important;
+  display: flex !important;
+  align-items: flex-start !important;
+  justify-content: center !important;
+  /*
+    卡片默认铺满视口（见下面 .rh-card 的第二段声明），这里的 padding 就是卡片到视口的距离，
+    照数据库脚本 `.acu-window.maximized` 的四周留 10px。以前是 `60px 16px 24px` 那条给
+    小窗留顶部工具栏空间的写法，卡片变满屏之后它会把卡片挤扁、底边压出视口。
+  */
+  padding: 10px !important;
+  margin: 0 !important;
+  background-color: var(--rh-scrim) !important;
+  backdrop-filter: blur(4px) !important;
+
+  /* —— 继承断点：外界对 body / * 的声明到这一层为止，进不了面板 ——
+     （子元素上的直接声明总是优先于继承值，所以这里加 !important 不会挡住面板内部样式） */
+  font-family: var(--rh-font) !important;
+  font-size: 14px !important;
+  font-weight: 400 !important;
+  font-style: normal !important;
+  font-variant: normal !important;
+  line-height: 1.5 !important;
+  letter-spacing: normal !important;
+  word-spacing: normal !important;
+  text-align: left !important;
+  text-transform: none !important;
+  text-indent: 0 !important;
+  text-shadow: none !important;
+  white-space: normal !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+  direction: ltr !important;
+  color: var(--rh-fg-soft) !important;
+  color-scheme: var(--rh-scheme, light) !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  filter: none !important;
+  transform: none !important;
+  mix-blend-mode: normal !important;
+  isolation: isolate !important;
+}
+
+/* —— 挂载点复位：外界若给 body 下的 div 设了 transform / filter，
+      会让我们这个 position: fixed 的蒙层改成相对它定位，整个面板会错位 —— */
+#rh-prefs-host {
+  all: unset !important;
+}
+
+/* —— 全子树兜底（:where() 特异性为 0，只负责挡住面板没写到的属性）—— */
+:where(.rh-mask *) {
+  box-sizing: border-box !important;
+  text-shadow: none !important;
+  -webkit-text-fill-color: currentColor !important;
+  letter-spacing: normal !important;
+  word-spacing: normal !important;
+  text-transform: none !important;
+  text-indent: 0 !important;
+  font-variant: normal !important;
+  font-style: normal !important;
+  word-break: normal !important;
+}
+
+/* —— 控件兜底：酒馆对裸标签 input/select/textarea/button/code 有直接规则 —— */
+:where(.rh-mask) :where(input, select, textarea, button, code, pre, kbd, option) {
+  font-family: inherit !important;
+  font-size: inherit !important;
+  line-height: inherit !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  text-shadow: none !important;
+}
+
+/* 下拉框：酒馆给它设了 appearance:none + 自己的背景箭头图，这里换成面板自绘的紫色箭头 */
+:where(.rh-mask) :where(select) {
+  margin: 0 !important;
+  padding-right: 22px !important;
+  cursor: pointer !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%237c3aed'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 6px center !important;
+  background-size: 8px 5px !important;
+}
+
+/*
+ * 下拉项：酒馆用主题变量给它上色，浅底深字在深色主题里会翻过来。
+ *
+ * 这里**不能**用 `:where()` 降到 0 特异性：酒馆页面里有一条内联样式表写着
+ * `select option { background-color: var(--ui-color-sec) !important }`（特异性 0,0,1），
+ * 两边都是 !important 时比特异性，`:where()` 的 0,0,0 会输——下拉展开就是深底深字。
+ * 用 `.rh-mask option`（0,1,1）压过它，同时仍低于面板自己的 `.rh-card ... option`（0,2,1）。
+ */
+.rh-mask option,
+.rh-mask optgroup {
+  background-color: var(--rh-bg-pure) !important;
+  color: var(--rh-fg) !important;
+  color-scheme: var(--rh-scheme, light) !important;
+}
+
+.rh-mask option:checked,
+.rh-mask option:hover {
+  background-color: var(--rh-accent-wash) !important;
+  color: var(--rh-fg) !important;
+}
+
+/* 原生控件（滚动条、日期选择器、下拉弹层）跟着面板的明暗走，别被酒馆的 color-scheme 带跑 */
+.rh-mask input,
+.rh-mask select,
+.rh-mask textarea,
+.rh-mask button {
+  color-scheme: var(--rh-scheme, light) !important;
+}
+
+/* 占位符：酒馆有 textarea::placeholder / .text_pole::placeholder */
+:where(.rh-mask) :where(input, textarea)::placeholder {
+  color: var(--rh-fg-faint) !important;
+  opacity: 1 !important;
+}
+
+/* 选中文字：外界可能给 ::selection 设成与背景同色 */
+:where(.rh-mask *)::selection {
+  background-color: var(--rh-accent-selection) !important;
+  color: var(--rh-fg) !important;
+}
+
+/* 滚动条：面板内的滚动区（正文区、日志框）也归自己管 */
+:where(.rh-mask *)::-webkit-scrollbar {
+  width: 10px !important;
+  height: 10px !important;
+}
+
+:where(.rh-mask *)::-webkit-scrollbar-track {
+  background-color: var(--rh-line-soft) !important;
+}
+
+:where(.rh-mask *)::-webkit-scrollbar-thumb {
+  background-color: var(--rh-thumb) !important;
+  border: 2px solid var(--rh-line-soft) !important;
+  border-radius: 999px !important;
+}
+
+/* 复选框：原生控件跟着面板配色走 */
+:where(.rh-mask) :where(input[type='checkbox'], input[type='radio']) {
+  accent-color: var(--rh-accent) !important;
+  -webkit-appearance: auto !important;
+  appearance: auto !important;
+  width: 15px !important;
+  height: 15px !important;
+  flex: none !important;
+  cursor: pointer !important;
+}
+

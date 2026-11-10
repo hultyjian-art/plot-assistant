@@ -22,6 +22,7 @@ import type { BoundaryRule } from './eng/context-tags';
 import { normalizeRules } from './eng/context-tags';
 import type { PlotPromptSegment } from './eng/task-model';
 import { normalizeEveryRounds } from './eng/schedule';
+import { isBlockEnabled } from './eng/prompt-blocks';
 import { normalizeTagDiffModes, type TagDiffMode } from './eng/tag-diff';
 import { isStoredPresetWrapper, unwrapPresetPayload } from './data/preset-store';
 
@@ -32,9 +33,7 @@ type Loose = Record<string, unknown>;
 /**
  * 面板上的「基础信息」。
  *
- * 只有两项是现行生效的：名称（选择、导出、轮次账本都按它对齐）与上下文轮数（`$7` 取几楼）。
- * 上游预设里那几个数（`recallCount` / `rateMain..rateCuckold` / 预设级 `minLength`）
- * 一律**不读进来** —— 它们要么只是占位符数值，要么是旧格式兜底字段，见 `COMPAT_ONLY_KEYS`。
+ * 只有两项是现行生效的：名称（选择、导出都按它对齐）与上下文轮数（`$7` 取几楼）。
  */
 export interface PresetMetaDraft {
   name: string;
@@ -84,16 +83,6 @@ export interface PresetDraft {
   excludeRules: PresetRuleDraft[];
 }
 
-/** 兼容字段算出来的占位符取值（见 `readPresetPlaceholders`）。 */
-export interface PresetPlaceholders {
-  sulv1: string;
-  sulv2: string;
-  sulv3: string;
-  sulv4: string;
-  /** 召回条数：只在提示词里被写成 `{{zhaohui}}`，代码不据此检索。 */
-  zhaohui: number;
-}
-
 /** 提示词块（面板上的一段）。 */
 export interface TaskBlockDraft {
   role: string;
@@ -103,7 +92,7 @@ export interface TaskBlockDraft {
   /** 段名只用于面板上认人，落盘时为空就删键。 */
   name: string;
   /**
-   * 这一段上这一期不编辑的键（`id`、`deletable`、`mainSlot`/`isMain`、上游将来加的扩展）。
+    * 这一段上这一期不编辑的键（`id`、`deletable`、上游将来加的扩展）。
    *
    * **必须跟着块走，不能按下标去原数组里捞。** 用户复制、上移、下移之后，
    * 第 N 个草稿块对应的早就不是原来第 N 段了 —— 按下标捞会把上一段的 id
@@ -112,11 +101,11 @@ export interface TaskBlockDraft {
   extra: Record<string, unknown>;
 }
 
-/** 任务草稿。`sourceIndex` 是「写回哪儿」的唯一凭据。 */
+/** 任务草稿。未编辑键的值随草稿带在 `extra` 里，重排后不会串到别的任务身上。 */
 export interface TaskDraft {
   /** 面板上的稳定键（原任务 id，或新任务的 `task-N`）。 */
   key: string;
-  /** 在原 `plotTasks` 里的下标；`-1` = 这次新加的。 */
+  /** 在原 `plotTasks` 里的下标；`-1` = 这次新加的（写回不靠它，见 `extra`）。 */
   sourceIndex: number;
   id: string;
   name: string;
@@ -125,10 +114,12 @@ export interface TaskDraft {
   order: number;
   maxRetries: number;
   minLength: number;
-  /** 每 N 轮跑一次；1 = 每轮（上游行为）。 */
+  /** 每 N 条用户楼层跑一次；1 = 每条（上游行为）。 */
   everyRounds: number;
   extractTags: string;
   extractInjectTags: string;
+  /** 豁免标签：不要求每轮回传，回传了仍照常抽取/落盘。 */
+  exemptTags: string;
   finalDirectiveTemplate: string;
   description: string;
   /** 这个任务单独用哪条 API（名字）；空 = 跟面板上「当前 API」走。 */
@@ -138,6 +129,8 @@ export interface TaskDraft {
   blocksKey: 'promptGroup' | 'prompts';
   /** 原任务里这一期不编辑、写回时原样带走的键名。 */
   preservedKeys: string[];
+  /** 原任务里这一期不编辑的键**连值一起**随身带（参照提示词块 `extra` 的写法）。 */
+  extra: Record<string, unknown>;
 }
 
 /** 一条校验结果。`error` 拦保存，`warn` 只提示。 */
@@ -157,35 +150,11 @@ export type PresetJsonParseResult =
 /**
  * 最终注入指令那一段的 id。
  *
- * id 必须与上游一致（`finalSystemDirective`），因为读取走的是 `legacyPromptFromThree(prompts, id)`
+ * id 必须与上游一致（`finalSystemDirective`），因为读取只认顶层同名键
  * —— 换个 id 等于这段内容再也读不到。
  */
 export const FINAL_DIRECTIVE_ID = 'finalSystemDirective';
 export const FINAL_DIRECTIVE_NAME = '最终注入指令';
-
-/**
- * **只做兼容、界面不暴露**的预设字段。
- *
- * 这几个数在运行时只被填进提示词占位符，或者只在「预设没有任务表」的兜底路径里被读：
- *
- * - `recallCount` → `{{zhaohui}}`：召回多少条**由提示词自己说**，代码不据此检索（上游
- *   `plot-task-engine.ts:387-392` 全仓仅此一处，纯数字替换）。
- * - `rateMain` / `ratePersonal` / `rateErotic` / `rateCuckold` → `{{sulv1}}`~`{{sulv4}}`：同理。
- * - 预设级 `minLength`：运行时读的是**任务级** `task.minLength`。
- * - `extractTags` / `extractInjectTags`（预设级）：同一个兜底路径才读。
- * - `mainPrompt` / `systemPrompt`：预设里没有任务表时，才拿去拼一条默认任务。
- *
- * 所以这里**不读进草稿、不做输入框**；保存时由整份深拷原样带走，用户数据一个字节都不丢。
- * 默认值取上游 `DEFAULT_PLOT_SETTINGS_ACU` 的原值，只在算占位符时用到。
- */
-export const COMPAT_PLACEHOLDER_DEFAULTS = {
-  recallCount: 20,
-  rateMain: 1,
-  ratePersonal: 1,
-  rateErotic: 0,
-  rateCuckold: 1,
-  minLength: 0,
-} as const;
 
 /**
  * `contextTurnCount` 缺省值取 **1**，不是上游骨架里的 3。
@@ -211,6 +180,7 @@ const TASK_EDITABLE_KEYS = new Set([
   'schedule',
   'extractTags',
   'extractInjectTags',
+  'exemptTags',
   'finalDirectiveTemplate',
   'description',
   'promptGroup',
@@ -239,11 +209,28 @@ function cloneRecord(value: unknown): Loose {
 }
 
 /**
+ * ACU 旧预设里那几个「只为填占位符而存在、引擎现在一律不读」的顶层字段。
+ *
+ * 保存与导出时剥掉，让重新导出的预设不再带着它们；导入侧不校验字段，剥掉不影响兼容。
+ */
+const LEGACY_PLACEHOLDER_FIELDS = [
+  'recallCount',
+  'rateMain',
+  'ratePersonal',
+  'rateErotic',
+  'rateCuckold',
+] as const;
+
+function stripLegacyPlaceholderFields(record: Loose): Loose {
+  for (const key of LEGACY_PLACEHOLDER_FIELDS) delete record[key];
+  return record;
+}
+
+/**
  * 「这个值等于没写」。
  *
  * `Number(null)` / `Number('')` 都等于 0 —— 如果直接交给 `Number`，一份
- * `rateErotic: null` 的预设会被读成「色情强度 0」而不是「没写、用默认值」。
- * 强度被悄悄调成 0 不会报错，只会让模型收到的指令变弱，这种错最难发现。
+ * 值为 `null` 的预设会被读成 0 而不是「没写、用默认值」，这种静默偏差最难发现。
  */
 function isBlankNumber(value: unknown): boolean {
   return value === null || value === undefined || value === '' || typeof value === 'boolean';
@@ -253,14 +240,6 @@ function isBlankNumber(value: unknown): boolean {
 function clampInt(value: unknown, fallback: number, min = 0, max = Number.MAX_SAFE_INTEGER): number {
   if (isBlankNumber(value)) return fallback;
   const num = Math.floor(Number(value));
-  if (!Number.isFinite(num)) return fallback;
-  return Math.min(Math.max(min, num), max);
-}
-
-/** 浮点：强度这几档允许小数（上游是 `z.number()`，不强制整数）。 */
-function clampNumber(value: unknown, fallback: number, min = 0, max = Number.MAX_SAFE_INTEGER): number {
-  if (isBlankNumber(value)) return fallback;
-  const num = Number(value);
   if (!Number.isFinite(num)) return fallback;
   return Math.min(Math.max(min, num), max);
 }
@@ -289,9 +268,8 @@ function splitRuleList(rules: BoundaryRule[]): PresetRuleDraft[] {
 /**
  * 一份预设 → 面板要的那几个字段。读不到的一律给「引擎会用的默认值」。
  *
- * 只读**界面真会改**的那几项。`recallCount` / 强度四档 / 预设级 `minLength` /
- * 预设级标签串这些兼容字段一概不进来 —— 它们只是占位符数值或旧格式兜底，
- * 界面上摆出来就是骗人（用户改了也不生效）。要拿它们算占位符请用 `readPresetPlaceholders`。
+ * 只读**界面真会改**的那几项；其余字段（世界书选择、任务表、旧格式兜底字段……）
+ * 一概不进草稿，保存时随整份深拷带走。摆到界面上就是骗人（用户改了也不生效）。
  */
 export function readPresetDraft(data: unknown): PresetDraft {
   const record = asRecord(data) || {};
@@ -308,24 +286,6 @@ export function readPresetDraft(data: unknown): PresetDraft {
     tagDiffModes: normalizeTagDiffModes(record.tagDiffModes),
     extractRules: splitRuleList(normalizeRules(record.contextExtractRules, text(record.contextExtractTags))),
     excludeRules: splitRuleList(normalizeRules(record.contextExcludeRules, text(record.contextExcludeTags))),
-  };
-}
-
-/**
- * 填进提示词的那几个占位符数值。
- *
- * 界面已经不再暴露它们（召回多少条由提示词自己说），但引擎替换 `{{zhaohui}}` /
- * `{{sulv1}}`~`{{sulv4}}` 时仍得有个数：预设里有就用预设的，没有就用上游默认值。
- * 这是**兼容字段的唯一读取入口**，改这里就等于改占位符的实际取值。
- */
-export function readPresetPlaceholders(data: unknown): PresetPlaceholders {
-  const record = asRecord(data) || {};
-  return {
-    sulv1: String(clampNumber(record.rateMain, COMPAT_PLACEHOLDER_DEFAULTS.rateMain)),
-    sulv2: String(clampNumber(record.ratePersonal, COMPAT_PLACEHOLDER_DEFAULTS.ratePersonal)),
-    sulv3: String(clampNumber(record.rateErotic, COMPAT_PLACEHOLDER_DEFAULTS.rateErotic)),
-    sulv4: String(clampNumber(record.rateCuckold, COMPAT_PLACEHOLDER_DEFAULTS.rateCuckold)),
-    zhaohui: clampInt(record.recallCount, COMPAT_PLACEHOLDER_DEFAULTS.recallCount, 0),
   };
 }
 
@@ -355,15 +315,15 @@ function readFinalDirective(record: Loose): string {
  * 为什么不做字段级 merge（只写改过的键）：那需要「读的时候记住原值」，
  * 而读是有损的（规则会归一化、标签会重排）。一旦读和写两套口径对不上，
  * 用户没动过的字段也会被悄悄改掉。整份写回虽然多写几个键，但行为是可预测的。
+ * 唯一的例外是 `stripLegacyPlaceholderFields`：那几个字段引擎已不读，留着只会让导出的
+ * 预设继续带着旧垃圾，所以保存时剥掉。
  */
 export function applyPresetDraft(data: unknown, draft: PresetDraft): Loose {
-  const base = cloneRecord(data);
+  const base = stripLegacyPlaceholderFields(cloneRecord(data));
   const meta = draft.meta || ({} as PresetMetaDraft);
 
   base.name = text(meta.name).trim();
   // 不碰 `enabled`：那是全局总开关的镜像，编辑预设不该改它（改了就变成「悄悄替你开关剧情推进」）。
-  // 也不碰 `recallCount` / `rateMain..rateCuckold` / 预设级 `minLength` / 预设级标签串：
-  // 它们是兼容字段，界面上没有输入框，整份深拷时已经原样带走了 —— 这里再写一遍只会凭空造键。
   base.contextTurnCount = clampInt(meta.contextTurnCount, DEFAULT_CONTEXT_TURN_COUNT_DRAFT, 0);
 
   // 标签差量：只写非 off 的项；用户没配就删键，别给导出的 JSON 添一堆空对象。
@@ -455,19 +415,20 @@ export function readTaskDrafts(data: unknown): TaskDraft[] {
     .map((item, index) => readTaskDraft(item, index));
 }
 
-/** 这份预设有没有自己的任务表（没有的话引擎会拿主提示词拼一条兜底任务）。 */
-export function hasTaskTable(data: unknown): boolean {
-  const record = asRecord(data);
-  return Array.isArray(record?.plotTasks) && record!.plotTasks.length > 0;
-}
-
 function readTaskDraft(task: Loose, index: number): TaskDraft {
   const id = text(task.id).trim() || `task-${index + 1}`;
   const group = readTaskBlocks(task);
   const preserved: string[] = [];
-  for (const key of Object.keys(task)) {
-    if (!TASK_EDITABLE_KEYS.has(key)) preserved.push(key);
+  const extra: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(task)) {
+    if (!TASK_EDITABLE_KEYS.has(key)) {
+      preserved.push(key);
+      extra[key] = value;
+    }
   }
+  // `schedule` 只有 `everyRounds` 这一期可编辑，整个对象仍要原样随身带：
+  // 写回时 `writeSchedule` 在它上面合并，否则 `lastRound` 之类的键会被抹掉。
+  if (asRecord(task.schedule)) extra.schedule = task.schedule;
   return {
     key: id,
     sourceIndex: index,
@@ -481,12 +442,14 @@ function readTaskDraft(task: Loose, index: number): TaskDraft {
     everyRounds: normalizeEveryRounds(asRecord(task.schedule)?.everyRounds),
     extractTags: joinTags(task.extractTags),
     extractInjectTags: joinTags(task.extractInjectTags),
+    exemptTags: joinTags(task.exemptTags),
     finalDirectiveTemplate: text(task.finalDirectiveTemplate),
     description: text(task.description),
     apiName: text(task.apiName).trim(),
     blocks: group.blocks,
     blocksKey: group.key,
     preservedKeys: preserved,
+    extra,
   };
 }
 
@@ -513,12 +476,7 @@ function looksLikeSegmentList(list: unknown[]): boolean {
   return !!first && hasOwn(first, 'role') && hasOwn(first, 'content') && !hasOwn(first, 'id');
 }
 
-/**
- * 段上这一期编辑的键；剩下的进 `extra` 原样带走。
- *
- * `mainSlot` / `isMain` / `isMain2` 故意不在这里 —— 主槽 A/B 这一版不做了，
- * 它们是上游的兼容标记，让它们落进 `extra` 跟着段走，比在界面上摆两个假槽位强。
- */
+/** 段上这一期编辑的键；剩下的进 `extra` 原样带走。 */
 const BLOCK_EDITABLE_KEYS = new Set(['role', 'content', 'enabled', 'name']);
 
 function toBlockDraft(segment: unknown): TaskBlockDraft {
@@ -542,27 +500,31 @@ function toBlockDraft(segment: unknown): TaskBlockDraft {
  * 草稿 → 新的任务表。
  *
  * 三条：
- * - **按 `sourceIndex` 回写原对象**（深拷后覆盖），`agentControl` 等字段原样带走；
- * - 新任务（`sourceIndex < 0`）另建一个干净对象；
+ * - **未编辑的键从草稿自己的 `extra` 带回**（深拷后覆盖编辑键），`mergeStrategy` / `triggerWhen` /
+ *   `agentControl` 这些逐字节不变；不回 `original` 按 `sourceIndex` 捞，那样上移/下移/删除后会贴错任务；
+ * - 新任务的 `extra` 是空的，另建一个干净对象；
  * - 块上的 A/B 槽标记不再由界面管理，随 `extra` 原样回到段上（见 `BLOCK_EDITABLE_KEYS`）。
  */
 export function applyTaskDrafts(data: unknown, drafts: TaskDraft[]): Loose {
   const base = cloneRecord(data);
-  const original = Array.isArray(base.plotTasks) ? (base.plotTasks as unknown[]) : [];
 
-  base.plotTasks = (Array.isArray(drafts) ? drafts : []).map(draft => {
-    const prev = draft.sourceIndex >= 0 ? asRecord(original[draft.sourceIndex]) : null;
-    const task: Loose = prev ? { ...prev } : {};
+  base.plotTasks = (Array.isArray(drafts) ? drafts : []).map((draft, index) => {
+    const task: Loose = cloneRecord(draft.extra);
 
     task.id = text(draft.id).trim() || draft.key;
     task.name = text(draft.name).trim();
     task.enabled = draft.enabled === true;
     task.stage = clampInt(draft.stage, 1, 1);
-    task.order = clampInt(draft.order, 0, 0);
+    // 「顺序」不再由用户配：数组位置就是顺序。同阶段是并发的，它只影响展示与标签合并的先后。
+    task.order = index;
     task.maxRetries = clampInt(draft.maxRetries, DEFAULT_TASK_MAX_RETRIES, 1);
     task.minLength = clampInt(draft.minLength, 0, 0);
     task.extractTags = joinTags(draft.extractTags);
     task.extractInjectTags = joinTags(draft.extractInjectTags);
+    // 空值不落键：没有豁免标签的旧任务写回后仍保持原来的键形状。
+    const exemptTags = joinTags(draft.exemptTags);
+    if (exemptTags !== '') task.exemptTags = exemptTags;
+    else delete task.exemptTags;
     task.finalDirectiveTemplate = text(draft.finalDirectiveTemplate);
     task.description = text(draft.description);
 
@@ -607,7 +569,7 @@ function writeSchedule(task: Loose, everyRounds: unknown): void {
   else task.schedule = schedule;
 }
 
-/** 提示词块写回。段上的兼容键（`mainSlot` 等）从 `extra` 原样带回来。 */
+/** 提示词块写回。段上不编辑的键从 `extra` 原样带回来。 */
 function writeTaskBlocks(task: Loose, draft: TaskDraft): void {
   const key = draft.blocksKey === 'prompts' ? 'prompts' : 'promptGroup';
   const blocks = Array.isArray(draft.blocks) ? draft.blocks : [];
@@ -621,8 +583,8 @@ function writeTaskBlocks(task: Loose, draft: TaskDraft): void {
     if (text(block.name).trim() !== '') segment.name = text(block.name).trim();
     else delete segment.name;
 
-    // 开关：关 = 写 `enabled: false`；开 = 删键（缺省即开）
-    if (block.enabled === false) segment.enabled = false;
+    // 开关：关 = 写 `enabled: false`；开 = 删键（缺省即开）。判定与渲染层共用。
+    if (!isBlockEnabled(block)) segment.enabled = false;
     else delete segment.enabled;
 
     return segment;
@@ -652,19 +614,13 @@ export function newBlockDraft(): TaskBlockDraft {
 }
 
 /**
- * 复制一块。
+ * 复制一块：换 id，其余键（含 `extra`）原样深拷。
  *
- * 两件必须做的事：
- * - **换 id**：两段同一个 id 时，上游按 id 找段的地方（`copyBlocks` 之类）会一直命中第一段。
- * - **摘掉主槽标记**：复制出来的是**新的一段**，不是原来那一段。留着 `mainSlot` / `isMain`
- *   会让同一份预设里出现两个 A 槽，上游按槽位取主提示词时取第一个，第二段就永远是死数据。
+ * 两段同一个 id 时，上游按 id 找段的地方会一直命中第一段，所以必须换。
  */
 export function copyBlockDraft(block: TaskBlockDraft): TaskBlockDraft {
   const extra: Record<string, unknown> = { ...(asRecord(block.extra) || {}) };
   if (typeof extra.id === 'string' && extra.id.trim() !== '') extra.id = `${extra.id.trim()}-copy`;
-  delete extra.mainSlot;
-  delete extra.isMain;
-  delete extra.isMain2;
   return {
     role: text(block.role).trim() || 'USER',
     content: text(block.content),
@@ -676,7 +632,7 @@ export function copyBlockDraft(block: TaskBlockDraft): TaskBlockDraft {
 
 /**
  * 一条新任务。id / 名字都按现有任务表避重 —— 两条任务同名同 id 会让
- * 触发轮次的账本（按 `presetName::taskId` 记）串在一起。
+ * 楼层锚点认错人，引擎里的续跑与结果记账也会串在一起。
  */
 export function newTaskDraft(existing: TaskDraft[]): TaskDraft {
   const list = Array.isArray(existing) ? existing : [];
@@ -709,12 +665,14 @@ export function newTaskDraft(existing: TaskDraft[]): TaskDraft {
     everyRounds: 1,
     extractTags: '',
     extractInjectTags: '',
+    exemptTags: '',
     finalDirectiveTemplate: '',
     description: '',
     apiName: '',
     blocks: emptyBlocks(),
     blocksKey: 'promptGroup',
     preservedKeys: [],
+    extra: {},
   };
 }
 
@@ -768,14 +726,13 @@ export function uniqueTaskName(base: string, existingNames: string[]): string {
 }
 
 /**
- * 把一个任务复制进当前预设（「跨预设复制 → 粘贴」用）。
+ * 把一个任务复制进当前预设（「复制 → 切预设 → 粘贴」用；同预设粘贴也走这里）。
  *
  * 三件事必须做，缺一个就出事：
- * - **换 `key` / `id`**：id 是触发轮次账本的键（`预设名::任务id`），沿用旧 id 会让两个任务的
- *   「上次第几轮跑过」记进同一个槽，周期判断直接串台。
+ * - **换 `key` / `id`**：id 是任务的身份键，沿用旧 id 会让两条任务在引擎里分不开，
+ *   续跑与结果记账直接串台。
  * - **名字避重**：卡片行上两条同名任务分不出谁是谁。
- * - **`sourceIndex` 归 -1**：它指的是「在原 `plotTasks` 里的下标」，外来任务在本预设里没有那个下标；
- *   写成 -1 就走「新增」分支，由 `applyTaskDrafts` 追加到表尾。
+ * - **`sourceIndex` 归 -1**：它记的是「在原 `plotTasks` 里的下标」，外来任务在本预设里没有那个下标。
  *
  * 提示词块**一律当成普通段**（见 `cloneBlockAsPlain`）：面板里没有「主槽」这个概念，复制出来的块
  * 不该带着旧槽位标记进去。
@@ -807,12 +764,14 @@ export function cloneTaskDraft(source: TaskDraft, existing: TaskDraft[]): TaskDr
     everyRounds: normalizeEveryRounds(source.everyRounds),
     extractTags: text(source.extractTags),
     extractInjectTags: text(source.extractInjectTags),
+    exemptTags: text(source.exemptTags),
     finalDirectiveTemplate: text(source.finalDirectiveTemplate),
     description: text(source.description),
     apiName: text(source.apiName),
     blocks: blocks.length > 0 ? blocks : emptyBlocks(),
     blocksKey: source.blocksKey === 'prompts' ? 'prompts' : 'promptGroup',
     preservedKeys: [],
+    extra: {},
   };
 }
 
@@ -822,20 +781,10 @@ export function cloneTaskDraft(source: TaskDraft, existing: TaskDraft[]): TaskDr
  * 块 id 重编成「新任务 id + 序号」：同一任务里两段同 id 时，上游按 id 找段永远命中第一段；
  * 用序号重编既保证唯一，也不依赖原 id 长什么样（可能没有，可能是上游生成的 uuid）。
  */
-/**
- * 复制一个块进别的任务：重新编号 id，并且**一律当普通段**。
- *
- * 主槽 A/B 是上游的老概念（`mainSlot` / `isMain` / `isMain2`），面板里早就不摆它了；
- * 复制出来的块是**新的一块**，没有任何理由继承原来的槽位 —— 留着只会让同一任务里出现第二个 A 槽，
- * 上游按槽位取「主提示词」时取第一个，后来那块永远读不到。数据层这几个键留着是为了兼容旧预设，
- * 不是给我们往里写的。
- */
+/** 复制一个块进别的任务：重新编号 id，其余键原样深拷。 */
 function cloneBlockAsPlain(block: TaskBlockDraft, taskId: string, index: number): TaskBlockDraft {
   const extra: Record<string, unknown> = { ...(asRecord(block.extra) || {}) };
   if (typeof extra.id === 'string' && extra.id.trim() !== '') extra.id = `${taskId}-b${index + 1}`;
-  delete extra.mainSlot;
-  delete extra.isMain;
-  delete extra.isMain2;
   return {
     role: text(block.role).trim() || 'USER',
     content: text(block.content),
@@ -849,8 +798,7 @@ function cloneBlockAsPlain(block: TaskBlockDraft, taskId: string, index: number)
  * 一份空预设骨架。
  *
  * 只写**现行生效**的那几项：名称、上下文轮数、两个空规则数组、空任务表、
- * 一段空的最终注入指令。兼容字段（`recallCount` / 强度四档 / 预设级 `minLength` /
- * 预设级标签串）一个都不凭空加 —— 缺了它们引擎会走默认值，多写了反而给导出文件添垃圾。
+ * 一段空的最终注入指令。旧格式兜底字段一个都不凭空加 —— 多写了反而给导出文件添垃圾。
  *
  * 提示词正文留空，**不抄 ACU 的默认提示词**：那是它的产品文案，抄过来就成了我们替用户写剧本，
  * 而且它一改我们就过时。用户自己填，或者从 ACU 导入。
@@ -971,14 +919,142 @@ function collectCandidates(parsed: unknown): unknown[] | null {
 }
 
 /**
+ * 预设级「老格式正文」的残留字段。
+ *
+ * 引擎只认任务里的提示词组（`plotTasks[].promptGroup`，见 `eng/preset-import.ts`
+ * 的 `normalizeTasks` 与 `eng/task-model.ts` 的 `resolvePromptGroup`）；预设顶层这
+ * 四个键是 ACU 老格式的兜底/镜像，有任务表时一条都不读。面板的「读成草稿 /
+ * 写回预设」也完全不碰它们 —— 于是老预设一旦被导进来，这几份旧正文就一直跟着
+ * 「整份深拷」的导出走：用户在任务里把提示词改了、导出的文件里却还是老那份。
+ *
+ * 只在**导出**时剥，本地库里存的预设本体一个字不动。
+ */
+const LEGACY_PRESET_PROMPT_FIELDS = [
+  'promptGroup',
+  'promptPresets',
+  'extractTags',
+  'extractInjectTags',
+] as const;
+
+function stripLegacyPresetPromptFields(record: Loose): Loose {
+  for (const key of LEGACY_PRESET_PROMPT_FIELDS) delete record[key];
+  return record;
+}
+
+/** 随预设文件一起带走的「世界书写入」设置。 */
+export interface PresetWorldbookWrite {
+  rules: {
+    tagName: string;
+    entryName: string;
+    depth: number;
+    order: number;
+    enabled: boolean;
+  }[];
+  source: 'character' | 'manual';
+  books: string[];
+}
+
+/** 上面这份设置在预设文件里的键名。 */
+export const WORLD_BOOK_WRITE_KEY = 'worldbookWrite';
+
+/**
+ * 逐条收口世界书写入规则，口径与 `settings.ts` 的 `readWorldbookWriteRules` 一致：
+ * 坏一条只丢一条，不整份清空；位置两个数只认正数，脏值退回默认（深度 2 / 顺序 10000）。
+ */
+function normalizeWorldbookWriteRules(raw: unknown): PresetWorldbookWrite['rules'] {
+  if (!Array.isArray(raw)) return [];
+  const out: PresetWorldbookWrite['rules'] = [];
+  for (const item of raw) {
+    const rule = asRecord(item);
+    if (!rule) continue;
+    const tagName = text(rule.tagName).trim();
+    if (tagName === '') continue;
+    out.push({
+      tagName,
+      entryName: typeof rule.entryName === 'string' ? rule.entryName : '',
+      depth:
+        typeof rule.depth === 'number' && Number.isFinite(rule.depth) && rule.depth >= 1
+          ? Math.floor(rule.depth)
+          : 2,
+      order:
+        typeof rule.order === 'number' && Number.isFinite(rule.order) && rule.order >= 0
+          ? Math.floor(rule.order)
+          : 10000,
+      enabled: rule.enabled === true,
+    });
+  }
+  return out;
+}
+
+/** 把任意来源的「世界书写入」设置收口成能写进文件的干净形状。 */
+function normalizeWorldbookWrite(raw: unknown): PresetWorldbookWrite {
+  const record = asRecord(raw) ?? {};
+  const books: string[] = [];
+  if (Array.isArray(record.books)) {
+    for (const book of record.books) {
+      if (typeof book === 'string' && book.trim() !== '') books.push(book);
+    }
+  }
+  return {
+    rules: normalizeWorldbookWriteRules(record.rules),
+    source: record.source === 'manual' ? 'manual' : 'character',
+    books,
+  };
+}
+
+/**
+ * 从脚本设置（`settings.plot`）里取出「世界书写入」设置，收口成能写进文件的形状。
+ *
+ * 这三个字段是全局设置、不在预设本体上，所以导出时得由面板显式带过来；
+ * 传进来的不是对象（比如单测只给了预设本体）时返回 `null` = 文件里不带这个键。
+ */
+export function packWorldbookWrite(plot: unknown): PresetWorldbookWrite | null {
+  const record = asRecord(plot);
+  if (!record) return null;
+  return normalizeWorldbookWrite({
+    rules: record.worldbookWriteRules,
+    source: record.worldbookWriteSource,
+    books: record.worldbookWriteBooks,
+  });
+}
+
+/**
+ * 从一份导入进来的预设里读出随文件带过来的「世界书写入」设置。
+ *
+ * 文件里没这个键（老文件、或者别处导出的预设）返回 `null`，调用方据此**不动**
+ * 设备上现有的设置；只有确实带了这份设置才以文件为准恢复。
+ */
+export function readWorldbookWriteFromPreset(preset: unknown): PresetWorldbookWrite | null {
+  const record = asRecord(preset);
+  if (!record) return null;
+  const carried = asRecord(record[WORLD_BOOK_WRITE_KEY]);
+  if (!carried) return null;
+  return normalizeWorldbookWrite(carried);
+}
+
+/**
  * 导出成 ACU 能直接吃的格式：`JSON.stringify([预设], null, 2)`。
  *
  * 为什么是数组：上游导入 `importPresetFromJson` 走 `normalizeImportedPresetPayloads`，
  * 它要求顶层是数组。我们导成单个对象的话，用户拿去 ACU 导入会得到「解析失败」，
  * 而文件明明长得很正常 —— 这种不兼容最难解释。
+ *
+ * 导出前做两件事：
+ * 1. 剥掉 `LEGACY_PLACEHOLDER_FIELDS` 与 `LEGACY_PRESET_PROMPT_FIELDS`：前者引擎
+ *    已不读，后者是老格式正文的残留。留着它们，「重新导出一份干净预设」就做不到。
+ *    ACU 导入不校验字段，剥掉不影响兼容。
+ * 2. 把 `worldbookWrite` 附上（给了第二参数时）：那三项是脚本全局设置，
+ *    不写进文件就带不到另一台设备。第二参数可选，老调用点不受影响。
  */
-export function toPresetExportJson(data: unknown): string {
-  return JSON.stringify([cloneRecord(data)], null, 2);
+export function toPresetExportJson(
+  data: unknown,
+  worldbookWrite?: PresetWorldbookWrite | null,
+): string {
+  const record = stripLegacyPresetPromptFields(stripLegacyPlaceholderFields(cloneRecord(data)));
+  if (worldbookWrite !== undefined && worldbookWrite !== null) {
+    record[WORLD_BOOK_WRITE_KEY] = normalizeWorldbookWrite(worldbookWrite);
+  }
+  return JSON.stringify([record], null, 2);
 }
 
 /** 导出文件名：去掉路径分隔符与引号，空名字给个兜底。 */

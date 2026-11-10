@@ -27,10 +27,12 @@
  * 打开「解除发送伪装」后不显示任何等待外观 —— 只是少个看得见的凭据，流程不变。
  */
 
+import { TOAST_NOTICE_MS } from '../constants';
 import { pageQuery, parentWindow, pageToastr } from '../tavern';
 import { logInfo, logWarn } from '../logger';
 import { TAG, MSG, UI } from '../copy';
 import { appendPlotBlock } from './run-in-flow';
+import { completePlotSend } from './after-send';
 import { clearSendBypass, consumeSendBypass } from './send-bypass';
 import type { RerushContext } from '../types';
 
@@ -46,11 +48,14 @@ export interface BubbleHandle {
    * 没有它的话，一轮两三个任务跑十几分钟，用户只知道「在跑」，分不清是在干活还是卡死了。
    */
   setProgress(info: BubbleProgress): void;
+  /** 某个任务跑完了（成功或失败）—— 把它从「进行中」挪到「已完成 / 失败」 */
+  settleTask(taskId: string, success: boolean): void;
   close(): void;
 }
 
 /** 气泡要显示的一格进度 —— 就是引擎 `TaskProgressInfo` 里气泡用得上的那几项。 */
 export interface BubbleProgress {
+  taskId: string;
   taskName: string;
   stage: number;
   stageTotal: number;
@@ -143,7 +148,15 @@ export function mountBubble(doc: Document, onStop: () => void): BubbleHandle {
     'height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,#7dd3fc,#a78bfa);transition:width .28s ease';
   track.appendChild(bar);
 
+  // 任务清单：同一阶段的任务是并发跑的，气泡必须**同时**列出所有正在进行的任务。
+  // 只显示最后一个开始的任务会让用户以为别的那几个没在跑（2026-11-09 第 4 条）。
+  const list = doc.createElement('div');
+  list.style.cssText = 'display:flex;flex-direction:column;gap:2px;width:100%;max-height:132px;overflow-y:auto';
+  // 在清单里上下滑是滚动，不该把整张卡片拖走。
+  list.addEventListener('pointerdown', (event) => event.stopPropagation());
+
   box.appendChild(head);
+  box.appendChild(list);
   box.appendChild(track);
 
   // 可拖动：按住提示条任何地方都能拖走，免得它挡住下面的按钮。
@@ -193,21 +206,82 @@ export function mountBubble(doc: Document, onStop: () => void): BubbleHandle {
 
   doc.body.appendChild(box);
 
+  /** 气泡里的一格任务。`index` 是引擎给的「第几个开始跑」，只用来排显示顺序。 */
+  interface BubbleTaskRow {
+    taskId: string;
+    name: string;
+    stage: number;
+    stageTotal: number;
+    index: number;
+    state: 'running' | 'done' | 'failed';
+  }
+
+  const rows = new Map<string, BubbleTaskRow>();
+  let totalTasks = 1;
+  let labelOverride = '';
+
+  const render = (): void => {
+    const ordered = [...rows.values()].sort((a, b) => a.index - b.index);
+    const settled = ordered.filter((row) => row.state !== 'running').length;
+    const running = ordered.filter((row) => row.state === 'running').length;
+    const total = Math.max(1, totalTasks, ordered.length);
+    // 进行中的任务算「半个已完成」：否则第一个任务开跑时进度条一动不动，
+    // 用户会以为卡住了 —— 而这一格正是他最需要知道「在动」的时候。
+    const ratio = Math.min(1, Math.max(0, (settled + running * 0.5) / total));
+    bar.style.width = `${(ratio * 100).toFixed(1)}%`;
+
+    label.textContent = labelOverride || `${UI.plot.bubbleProgress} ${settled}/${total}`;
+    head.title = label.textContent;
+
+    list.textContent = '';
+    for (const row of ordered) {
+      const line = doc.createElement('div');
+      line.style.cssText = 'display:flex;align-items:baseline;gap:5px;min-width:0';
+      const icon = doc.createElement('span');
+      icon.textContent = row.state === 'running' ? '▶' : row.state === 'done' ? '✓' : '✕';
+      icon.style.cssText = `flex:0 0 auto;width:10px;text-align:center;color:${
+        row.state === 'running' ? '#7dd3fc' : row.state === 'done' ? '#86efac' : '#fca5a5'
+      }`;
+      const name = doc.createElement('span');
+      name.textContent = row.name || '任务';
+      name.style.cssText = 'flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+      if (row.state === 'done') name.style.opacity = '.62';
+      if (row.state === 'failed') name.style.color = '#fecaca';
+      line.appendChild(icon);
+      line.appendChild(name);
+      if (row.stageTotal > 1) {
+        const stage = doc.createElement('span');
+        stage.textContent = `阶段 ${row.stage}/${row.stageTotal}`;
+        stage.style.cssText = 'flex:0 0 auto;opacity:.55;font-size:11px';
+        line.appendChild(stage);
+      }
+      list.appendChild(line);
+    }
+  };
+
   return {
     setText(text: string): void {
+      labelOverride = text;
       label.textContent = text;
     },
     setProgress(info: BubbleProgress): void {
-      const total = Math.max(1, Math.floor(info.total) || 1);
-      const stageTotal = Math.max(1, Math.floor(info.stageTotal) || 1);
-      const index = Math.min(total, Math.max(1, Math.floor(info.index) || 1));
-      // 正在跑的那个算「半个已完成」：否则第一个任务开跑时进度条一动不动，
-      // 用户会以为卡住了 —— 而这一格正是他最需要知道「在动」的时候。
-      const ratio = Math.min(1, Math.max(0, (index - 0.5) / total));
-      bar.style.width = `${(ratio * 100).toFixed(1)}%`;
-      const stageText = stageTotal > 1 ? `阶段 ${info.stage}/${stageTotal} · ` : '';
-      label.textContent = `${stageText}${info.taskName || '任务'}（${index}/${total}）`;
-      head.title = label.textContent;
+      const taskId = info.taskId || `${info.stage}:${info.taskName}:${info.index}`;
+      rows.set(taskId, {
+        taskId,
+        name: info.taskName || '任务',
+        stage: Math.max(1, Math.floor(info.stage) || 1),
+        stageTotal: Math.max(1, Math.floor(info.stageTotal) || 1),
+        index: Math.max(1, Math.floor(info.index) || 1),
+        state: 'running',
+      });
+      totalTasks = Math.max(1, Math.floor(info.total) || 1);
+      render();
+    },
+    settleTask(taskId: string, success: boolean): void {
+      const row = rows.get(taskId);
+      if (!row) return;
+      row.state = success ? 'done' : 'failed';
+      render();
     },
     close(): void {
       box.remove();
@@ -292,6 +366,10 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
         join: 'final',
         // 进度喂给气泡：阶段、任务名、第几个 / 共几个
         onTaskStart: (info) => bubble?.setProgress(info),
+        // 跑完一个就把那一行标成完成/失败 —— 气泡要同时看得见所有任务的状态
+        onTaskSettled: (result) => {
+          if (result?.taskId) bubble?.settleTask(result.taskId, result.success === true);
+        },
       });
 
       if (abort.signal.aborted) {
@@ -301,7 +379,7 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
 
       if (result.ok === false) {
         // 真跑过却没跑完：停在原地，别把没拼上剧情的原文发出去
-        pageToastr()?.warning(result.note, UI.plot.bubbleTitle, { timeOut: 6000 });
+        pageToastr()?.warning(result.note, UI.plot.bubbleTitle, { timeOut: TOAST_NOTICE_MS });
         logWarn(TAG.plotGate, result.note);
         return;
       }
@@ -315,6 +393,18 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
       bypass = true;
       try {
         clickSend();
+        // 楼层是酒馆随后建的：等它出现后补写触发锚点（升级模式也要写）。
+        // 不 await，写失败只记一笔，不能让已经发出去的消息显示成失败。
+        const commit = result.commit;
+        if (commit) {
+          const mode = ctx.settings.plot.stashMode;
+          void completePlotSend(commit, { mode })
+            .then((check) => {
+              if (!check.landed) logWarn(TAG.plotGate, `楼层收尾没等到：${check.note}`);
+              else if (check.plotCount !== 1) logWarn(TAG.plotGate, `楼层收尾异常：${check.note}`);
+            })
+            .catch((error) => logWarn(TAG.plotGate, '楼层收尾检查失败', error));
+        }
       } finally {
         // 下一次事件循环再撤：capture 监听到的点击是同步派发的
         win?.setTimeout(() => {
@@ -323,7 +413,7 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
       }
     } catch (error) {
       logWarn(TAG.plotGate, MSG.plotGateCrashed, error);
-      pageToastr()?.error(MSG.plotGateCrashed, UI.plot.bubbleTitle, { timeOut: 6000 });
+      pageToastr()?.error(MSG.plotGateCrashed, UI.plot.bubbleTitle, { timeOut: TOAST_NOTICE_MS });
     } finally {
       finishUi();
     }

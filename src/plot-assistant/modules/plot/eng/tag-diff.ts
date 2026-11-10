@@ -3,10 +3,11 @@
  *
  * 用户口径（2026-11-06）：
  * - 差量开关放在**标签**上，不放在任务上：一个任务可以同时产出快照标签和积累标签。
- * - 三种模式：
+ * - 四种模式：
  *   - `off`    ：每轮全量输出（默认；适合 basic_info / plot_judge 这类快照）；
  *   - `keep`   ：整标签保留——本轮没输出这个标签就沿用上一轮，输出了就整块替换；
  *   - `blocks` ：按 `###` 小节合并——只写变动的小节，没写的小节沿用上一轮。
+ *   - `table`  ：按 Markdown 表格行合并——按第一列作行键，只写变动的行，没写的行沿用上一轮。
  * - `【无变化】` 等价于「没输出」：保留上一轮内容。
  * - `【删除】名字` 删除一个 `###` 小节（角色离场、条目作废）。
  *
@@ -14,13 +15,11 @@
  * 从上一轮 `<plot>` 里用 `buildTagMap` 建好传进来。
  */
 
-import { extractTaskTags, type TagMap } from './tags';
+import { isPlainObject } from '../guards';
+import { buildTagBlock, extractTaskTags, type TagMap } from './tags';
 
 /** 单个标签的差量模式。 */
 export type TagDiffMode = 'off' | 'keep' | 'blocks' | 'table';
-
-/** UI 下拉里的固定顺序。 */
-export const TAG_DIFF_MODES: readonly TagDiffMode[] = ['off', 'keep', 'blocks', 'table'];
 
 /** 脏值一律按「关闭」处理——宁可不省 token，也不要静默改写旧档案。 */
 export function normalizeTagDiffMode(value: unknown): TagDiffMode {
@@ -33,7 +32,7 @@ export function normalizeTagDiffMode(value: unknown): TagDiffMode {
  */
 export function normalizeTagDiffModes(value: unknown): Record<string, TagDiffMode> {
   const out: Record<string, TagDiffMode> = {};
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  if (!isPlainObject(value)) return out;
   for (const [rawName, rawMode] of Object.entries(value as Record<string, unknown>)) {
     const name = String(rawName ?? '').trim();
     if (name === '') continue;
@@ -53,7 +52,7 @@ export function splitTagList(raw: unknown): string[] {
 
 /** 收集一份预设里所有出现过的标签名：任务抽取标签 + 最终注入里的 `{{标签}}`。 */
 export function collectKnownTagNames(
-  tasks: ReadonlyArray<{ extractTags?: string; extractInjectTags?: string }>,
+  tasks: ReadonlyArray<{ extractTags?: string; extractInjectTags?: string; exemptTags?: string }>,
   directiveTemplate: string,
 ): string[] {
   const names: string[] = [];
@@ -66,7 +65,7 @@ export function collectKnownTagNames(
   };
 
   for (const task of tasks) {
-    for (const raw of [task.extractTags, task.extractInjectTags]) {
+    for (const raw of [task.extractTags, task.extractInjectTags, task.exemptTags]) {
       for (const name of splitTagList(raw)) push(name);
     }
   }
@@ -573,7 +572,7 @@ export function tagsNeedingFullRefresh(
   modes: Record<string, TagDiffMode>,
   previousTags: TagMap,
 ): string[] {
-  const names = splitTagList(`${task.extractTags || ''},${task.extractInjectTags || ''}`);
+  const names = splitTagList(`${task.extractTags || ''},${task.extractInjectTags || ''},${task.exemptTags || ''}`);
   const out: string[] = [];
   for (const name of names) {
     const mode = normalizeTagDiffMode(modes[name]);
@@ -587,6 +586,8 @@ export interface TagDiffTaskLike {
   id?: string;
   extractTags?: string;
   extractInjectTags?: string;
+  /** 豁免标签：不要求必达，但回传了仍要参与抽取与差量合并 */
+  exemptTags?: string;
 }
 
 export interface ApplyTagDiffsInput {
@@ -610,8 +611,10 @@ export function applyTagDiffs(input: ApplyTagDiffsInput): string {
   const raw = typeof input.rawResponse === 'string' ? input.rawResponse : '';
   const task = input.task || {};
   const modes = input.modes || {};
-  const extraction = extractTaskTags(raw, task.extractTags || '', task.extractInjectTags || '');
-  const names = splitTagList(`${task.extractTags || ''},${task.extractInjectTags || ''}`);
+  // 豁免标签也要进抽取组：它们不强制出现，但出现时必须能被合并/落盘。
+  const extractGroup = [task.extractTags || '', task.exemptTags || ''].filter(part => part.trim() !== '').join(',');
+  const extraction = extractTaskTags(raw, extractGroup, task.extractInjectTags || '');
+  const names = splitTagList(`${task.extractTags || ''},${task.extractInjectTags || ''},${task.exemptTags || ''}`);
   const uniqueNames: string[] = [];
   for (const name of names) {
     if (!uniqueNames.includes(name)) uniqueNames.push(name);
@@ -664,7 +667,7 @@ export function applyTagDiffs(input: ApplyTagDiffsInput): string {
   for (const name of uniqueNames) {
     const content = contents.get(name);
     if (content === undefined || nested.has(name)) continue;
-    blocks.push(`<${name}>${content}</${name}>`);
+    blocks.push(buildTagBlock(name, content));
   }
   return blocks.join('\n\n');
 }

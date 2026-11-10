@@ -55,6 +55,7 @@ export const MSG = {
   panelStaleRemoved: '发现上一版脚本留下的面板挂载点，已清掉再挂新的',
   panelRaised: '设置面板本来就开着，已把它挪到最前面',
   settingsSaved: '保存好了。',
+  settingsPresetInvalid: (reason: string): string => `预设校验未通过，全部改动未保存：${reason}`,
 
   // —— 手势识别
   captureChannelReady: (eventType: string): string => `捕获通道收到第一个按下事件，事件族 ${eventType}`,
@@ -126,8 +127,8 @@ export const MSG = {
   toastFilled: '内容已填进输入框，可以随时改了再发',
   flowAborted: (reason: string): string =>
     `重刷流程中断：${reason}。楼层到底删没删，请对照上面的日志确认`,
-  plotChatSwitched: '推进跑完时聊天已经换掉了，这一轮结果作废：没写输入框、没删楼层、没发送',
-  plotStoppedByUser: '已按你的意思终止这一轮推进：输入框和楼层都没动',
+  plotChatSwitched: '推进跑完时聊天已经换掉了，这一轮结果作废：原文已放进输入框，旧聊天的楼层已按重刷流程删除，这一轮不发送',
+  plotStoppedByUser: '已按你的意思终止这一轮推进：原文已放进输入框，楼层已按重刷流程删除，这一轮不发送',
 
   // —— 级联捕获过程
   captureSourceUser: (floorId: number): string => `取文来源：最新用户楼层 ${floorId}`,
@@ -154,22 +155,16 @@ export const UI = {
   /** 标题与菜单提示都带产物名：完整版「剧情推进助手」，轻量版「剧情推进助手·轻」 */
   panelTitleOf: (name: string): string => `${name}设置`,
   menuTooltipOf: (name: string): string => `打开${name}的设置`,
-  /** 左侧功能列：两个大功能，点哪个右边就进哪一套页面 */
+  /** 左侧功能列：三个大功能，点哪个右边就进哪一套页面 */
   sections: {
     rerush: '推进重刷',
     plot: '剧情推进',
+    guide: '使用说明',
   },
   tabs: {
     bindings: '手势绑定',
     capture: '捕获链',
     feedback: '反馈与日志',
-  },
-  /** 剧情推进那一套的标签页 */
-  plotTabs: {
-    preset: '预设与开关',
-    tasks: '任务清单',
-    assets: '暂存与日志',
-    apis: 'API 配置',
   },
   /** 剧情推进页的文案 */
   plot: {
@@ -187,6 +182,7 @@ export const UI = {
     /** 发送拦截：等待气泡与「解除发送伪装」 */
     bubbleTitle: '剧情推进',
     bubbleRunning: '推进中，稍后自动落成楼层',
+    bubbleProgress: '推进中',
     bubbleStop: '终止',
     bubbleStopping: '正在终止…',
     disguiseLabel: '解除发送伪装',
@@ -290,22 +286,20 @@ export const UI = {
     editorTaskName: '任务名',
     editorTaskEnabled: '启用',
     editorTaskStage: '阶段',
-    editorTaskOrder: '顺序',
     editorTaskMaxRetries: '重试次数',
     editorTaskApi: '这个任务的 API',
     editorTaskApiGlobal: '跟「当前 API」走',
     editorTaskApiHint:
       '单独挑一条的话，这个任务的请求就走那一条；留空就用 API 页里选中的那条。想把重活分给好一点的接口，就靠这一格。',
     editorTaskMinLength: '最少字数',
-    editorTaskEvery: '每几轮跑一次',
-    editorTaskEveryHint: '1 = 每轮都跑；填 3 = 每三轮回一次。',
+    editorTaskEvery: '每几楼进行一次',
+    editorTaskEveryHint: '1 = 每条用户楼层都跑；填 3 = 每隔 3 条用户楼层跑一次。只数用户发的楼层（被隐藏的也算），AI 回复不算；删层重刷不新增楼层，所以不会误触发。',
     editorTaskTags: '抽取标签',
     editorTaskInject: '只留字段',
+    editorTaskExempt: '豁免标签',
+    editorTaskExemptHint: '列在这里的标签不要求每轮都回传；真回传了仍照常抽取、落盘、进世界书。',
     editorTaskCopy: '复制',
-    editorTaskCopyHint: '跨预设复制：先把它放进剪贴板，再切到另一份预设点「粘贴」',
-    editorTaskPaste: '粘贴',
-    editorTaskPasteEmpty: '剪贴板里还没有任务 —— 先在别的预设里点「复制」',
-    clipFrom: '来自',
+    editorTaskCopyHint: '复制整条任务：点了会弹出选择窗口，直接挑目标预设',
     editorTaskBlocks: '提示词块',
     editorTaskBlocksHint: '关掉的块不会发给 AI；块按这里的顺序发，可以复制、上下移。',
     editorBlockRole: '角色',
@@ -313,11 +307,24 @@ export const UI = {
     editorBlockAddTop: '＋ 在最上方插入',
     editorBlockAddBottom: '＋ 在最下方插入',
     editorBlockCopy: '复制',
-    editorBlockSend: '跨预设复制',
-    editorBlockSendHint: '把这复制到另一份预设的任务里：先切预设，再在那边点「粘贴块」',
-    editorBlockPaste: '粘贴块',
-    editorBlockPasteEmpty: '剪贴板里还没有块 —— 先在别处点「跨预设复制」',
+    editorBlockSend: '跨预设/任务复制',
+    editorBlockSendHint: '复制这块提示词：点了会弹出选择窗口，直接挑目标预设和任务',
     editorBlockDrop: '删掉',
+
+    /** 复制粘贴子页面：任务与提示词块共用同一个去处 */
+    copyPasteTitle: '复制到哪里',
+    copyPasteHint: (kind: 'block' | 'task'): string =>
+      kind === 'block' ? '点下面任意一条任务，这块提示词就粘进那条任务里。' : '点下面任意一份预设，这条任务就加进那份预设里。',
+    copyPasteSafety: '粘之前会先自动保存一次当前设置；粘进去的内容还要再点面板右上角的「保存」才会留下，直接关掉页面就不会保留。',
+    copyPasteEmpty: '还没有导入过预设 —— 先在任务页把预设导入到本脚本里。',
+    copyPasteNoTasks: '这份预设里还没有任务。',
+    copyPasteWholePreset: '粘到这份预设',
+    copyPasteCancel: '取消',
+    copyPasteFrom: (name: string): string => `来自「${name}」`,
+    copyPasteDone: (preset: string, task: string): string =>
+      `已经粘到「${preset} › ${task}」。还要点面板右上角的「保存」才会留下。`,
+    copyPasteDoneTask: (preset: string): string =>
+      `已经把任务加进「${preset}」。还要点面板右上角的「保存」才会留下。`,
     editorBlockUp: '上移',
     editorBlockDown: '下移',
     editorBlockOn: '开',
@@ -370,8 +377,8 @@ export const UI = {
     placeholderLegend: [
       { code: '$U', desc: '用户人设（酒馆里的 persona 描述 + 主角信息）' },
       { code: '$C', desc: '当前角色卡的描述' },
-      { code: '$1', desc: '本轮命中的世界书内容，会包进 <worldbook_context> 信封；内容为空时整个信封消失' },
-      { code: '$9', desc: '世界书里剔掉数据库生成条目后的那一份，同样走信封' },
+      { code: '$1', desc: '本轮命中的世界书内容，会包进 <worldbook_context> 信封；内容为空时整个信封消失。本脚本写进世界书的托管条目（plot_assistant- 开头）不算在内' },
+      { code: '$9', desc: '世界书里剔掉数据库生成条目后的那一份，同样走信封，也不含本脚本的托管条目' },
       { code: '$5', desc: '纪要索引（世界书里的纪要条目）；取不到就用纪要表的概要与编码索引列，再取不到就用总体大纲表' },
       { code: '$7', desc: '默认上下文：最近 N 条 AI 楼层，按上面的提取／排除规则处理过' },
       { code: '$6', desc: '上一轮剧情推进的输出（<plot> 那一段）' },
@@ -383,7 +390,7 @@ export const UI = {
     /** 任务清单 */
     tasksLabel: '这套预设里有哪些任务',
     tasksHint:
-      '这里列出的是选中预设里的任务，只做展示。要改提示词、开关、触发轮次，去「预设与开关」页点「编辑这份预设」—— 改的是本地库里那份副本，数据库脚本那边不会被动到。',
+      '这里列出的是选中预设里的任务，只做展示。要改提示词、开关、触发间隔，去「预设与开关」页点「编辑这份预设」—— 改的是本地库里那份副本，数据库脚本那边不会被动到。',
     tasksEmpty: '还没选预设，或者这套预设里没有任务。',
     taskEnabled: '启用',
     taskDisabled: '已停用',
@@ -402,6 +409,8 @@ export const UI = {
     stashHint:
       '每一层用户楼层都有自己的推进成果。同一层最多留两版（第三次会挤掉最旧的那版）；点开一版可以看内容、改文字、按标签删掉某一块 —— 只有点「保存」才真的写进去。',
     stashEmpty: '还没有暂存的成果。跑一次剧情推进，成功之后就会出现在这里。',
+    /** 推进运行期间面板只读：引擎整轮只 load 一次账本，中途整份写回会把成果盖掉 */
+    stashPlotRunning: '正在推进，跑完再改',
     stashRefresh: '刷新',
     stashFloor: (floorId: number): string => `第 ${floorId} 楼`,
     stashPending: (pending: number): string => `未完成，还欠 ${pending} 个任务`,
@@ -443,12 +452,22 @@ export const UI = {
     stashDirtyLeave: '放弃改动并关掉',
     stashTextLabel: '正文（可以直接改）',
     stashTagsLabel: '标签块（点 × 删掉这一块）',
+  stashLedgerLabel: '账本里的标签（只进字段 / 写进世界书，改完点「保存」才生效）',
+  stashLedgerEmpty: '这一版里没有只进字段的标签。',
     stashNoTags: '这一版里没有独立的标签块。',
     stashGapHint: (tags: string, tasks: number): string =>
       `这一版现在缺 ${tags}。下次拿它生成楼层时，会自动把产出这些标签的 ${tasks} 个任务重跑一遍补回来。`,
     stashTagRemoved: (tag: string): string => `已删掉 <${tag}>，点「保存」才生效`,
     stashTagMissing: (tag: string): string => `没找到 <${tag}>`,
     stashEditTarget: (floorId: number, label: string): string => `第 ${floorId} 楼 · ${label}`,
+    stashOpenView: '查看',
+    stashViewProgress: '查看进度',
+    stashWorkingTitle: (floorId: number): string => `第 ${floorId} 楼 · 进行中`,
+    stashWorkingHint: '这一层还没跑完。下面是已经完成和还欠着的任务；关掉这里点发送，就会接着没跑完的继续跑。',
+    stashWorkingEmpty: '这一层还没开始跑任何任务。',
+    stashWorkingFoot: '带「只进字段」的标签不会写进正文，只跟着世界书写入走。',
+    stashWorkingTags: '带回的标签：',
+    stashWorkingInject: '只进字段：',
     stashApply: '应用到楼层',
     stashApplyFailed: '写入楼层失败。',
     stashApplied: '已写回楼层正文（只换了 <plot> 那一段，你的原话还在）。',
@@ -463,6 +482,24 @@ export const UI = {
     stashDeleted: '这一版已删除。',
     stashDeleteMissing: '这一版已经不在账本里了（可能刚被挤掉），刷新一下再看。',
 
+    /** 搜索与替换（2026-11-08 批 45）：跨所有楼层、所有版本找一段文字 */
+    stashSearchOpen: '搜索暂存区（在所有楼层的所有版本里找）',
+    stashSearchPlaceholder: '搜索内容…',
+    stashSearchPrev: '上一处（Shift+Enter）',
+    stashSearchNext: '下一处（Enter）',
+    stashSearchClose: '收起搜索',
+    stashMatchNone: '没找到',
+    stashMatchTotal: (total: number): string => `共 ${total} 处`,
+    stashMatchPosition: (at: number, total: number): string => `${at} / ${total}`,
+    stashReplacePlaceholder: '替换成…',
+    stashReplace: '替换',
+    stashReplaceAll: '全部替换',
+    stashReplaceHint: '把当前高亮的那处换掉（先进草稿，点「保存」才生效）',
+    stashReplaceAllHint: '把当前打开的这一版里的匹配全换掉（先进草稿，点「保存」才生效）',
+    stashReplaceAllDone: (count: number): string => `这一版里替换了 ${count} 处（还没保存，点「保存」才生效）。`,
+    stashReplaceNone: '这一版里没有可替换的匹配。',
+    stashSearchDirtyBlock: '这一版还有没保存的改动，先保存或关掉，再跳到别的版本。',
+
     /** 运行日志（每轮每个任务：提示词、回传、耗时、重试、报错） */
     logTitle: '运行日志',
     logHint: '每一轮剧情推进的每个任务都记一条：提示词开头、AI 原样回传、抽到的标签、耗时、重试次数。失败原因写在最前面。最近 20 轮，更早的会被挤掉。',
@@ -472,7 +509,7 @@ export const UI = {
     logExport: '导出 md',
     logExportOk: '已复制到剪贴板，直接粘给我就行。',
     logExportFallback: '复制失败，已改成下载 plot-log.md。',
-    logRound: (roundIndex: number, floorId: number): string => `第 ${roundIndex} 轮 · 第 ${floorId} 楼`,
+    logRound: (floorId: number): string => `第 ${floorId} 楼`,
     logRoundMeta: (preset: string, at: string, count: number): string => `${preset} · ${at} · ${count} 个任务`,
     logStatusRunning: '进行中',
     logStatusOk: '全部成功',
@@ -485,7 +522,8 @@ export const UI = {
     logSentLabel: '发送给 AI 的内容',
     logSentHint: '一块一条，点开看这一块到底写了什么。',
     logReasoningLabel: 'AI 推理内容',
-    logReasoningEmpty: '这次没有拿到推理内容 —— 酒馆的生成接口只回正文，不把模型的思考过程交出来。',
+    logReasoningEmpty: '这条记录没有推理内容：可能是升级前跑的老记录，或者这个模型/渠道不返回思考过程。',
+    logNoReasoning: '没有记录',
     logBlockTitle: (role: string, name: string): string => (name === '' ? role : `${name} · ${role}`),
     logBlockSize: (chars: number): string => `${chars} 字`,
     logExpand: '展开查看',
@@ -527,6 +565,7 @@ export const UI = {
     apisPullModelsBusy: '拉取中…',
     apisPullModelsOk: (count: number) => `拉到 ${count} 个模型，在下面的「模型列表」里挑。`,
     apisPullModelsFailed: (reason: string) => `拉取失败：${reason}`,
+    apisPullModelsCancelled: '已取消（切换了渠道或关闭了面板）。',
     apisSource: '接口协议',
     apisMaxTokens: '回复上限',
     apisTemperature: '温度',
@@ -543,13 +582,13 @@ export const UI = {
     apisCollapse: '收起',
     previewOpen: '预览这次会发什么',
     previewOpenHint: '拿真数据把占位符换掉再给你看，不写设置、不发请求。',
-    previewTitle: '这一轮会发给 AI 的内容',
+    previewTitle: '这次发送会发给 AI 的内容',
     previewHint: '这里就是这一次真正发给 AI 的请求内容（占位符已换成真值）。点任务名切任务；$1 世界书与 $5 纪要都按当前聊天现读。',
     previewBusy: '正在拼提示词……',
-    previewRoundMeta: (preset: string, round: number, count: number) => `预设：${preset} · 第 ${round} 轮 · 要跑 ${count} 个任务`,
-    previewSkipped: (count: number) => `另有 ${count} 个任务按轮次规则被跳过。`,
-    previewNoTask: '这一轮没有任务要跑：可能全部停用、提示词块全关，或者都没到触发轮次。',
-    previewTaskMeta: (stage: number, order: number, count: number) => `阶段 ${stage} · 顺序 ${order} · ${count} 条消息`,
+    previewRoundMeta: (preset: string, round: number, count: number) => `预设：${preset} · 第 ${round} 条用户楼层 · 要跑 ${count} 个任务`,
+    previewSkipped: (count: number) => `另有 ${count} 个任务按楼层间隔被跳过。`,
+    previewNoTask: '这次发送没有任务要跑：可能全部停用、提示词块全关，或者都没到楼层间隔。',
+    previewTaskMeta: (stage: number, count: number) => `阶段 ${stage} · ${count} 条消息`,
     // —— 世界书（`$1`）——
     worldbookSection: '世界书（$1）',
     worldbookHint:
@@ -580,8 +619,40 @@ export const UI = {
     worldbookEntryPrimaryTag: '主书',
     worldbookEntryAdditionalTag: '附加',
     worldbookEntryBlockedHint:
-      '名字里带「规则 / 变量 / MVU / 状态 / 格式」这类词的条目、以及数据库脚本生成的条目，本来就不会进 $1（和上游一致），所以这里标出来。',
+      '名字里带「规则 / 变量 / MVU / 状态 / 格式」这类词的条目、以及数据库脚本生成的条目，本来就不会进 $1（和上游一致），所以这里标出来。本脚本自己写进世界书的条目（plot_assistant- 开头）同样不进 $1，防止与任务里的 {{标签}} 重复。',
     worldbookEntryReadError: (message: string) => `读条目失败：${message}`,
+    // —— 世界书写入（把标签块写成条目；2026-11-07 批 36-38 用户定）——
+    wbWriteSection: '世界书写入（标签块 → 条目）',
+    wbWriteHint:
+      '这里决定一轮推进跑完后，把哪些标签块写成世界书条目。它与上面的「世界书（$1）」是两件事：那块管任务提示词读哪几本书，这一块管把成果写进哪本书。条目在每轮跑完后自动写入、自动更新；换聊天或换角色卡后，世界书里只留当前聊天写下的条目，切回来会自动恢复。把规则停用后，下次切换时它的条目也会被清掉。',
+    wbWriteSource: '写到哪本书',
+    wbWriteFollow: '跟随角色卡',
+    wbWriteManual: '手动选择',
+    wbWriteFollowHint: '写到当前角色卡绑定的世界书（主书 + 附加书，与 $1 的读端口径一致）。',
+    wbWriteManualHint: '写到下面勾选的那几本书，可以是没绑到角色卡上的全局设定书。',
+    wbWritePickHint: '勾哪几本，条目就写进哪几本。一本都不勾等于不写。',
+    wbWriteSearch: '搜书名…',
+    wbWriteRuleSection: '写入规则',
+    wbWriteRuleHint:
+      '每条规则 = 选一个标签 + 起一个条目名。条目名默认就是标签名，可以改；完整条目名会自动带上固定前缀 plot_assistant-（写死，不可改）。注意：条目名改了之后，「切聊天 / 切角色卡自动切换」对这条规则就失效（旧名字认不出来），改回标签名又恢复，脚本不做兼容。',
+    wbWriteAdd: '加一条规则',
+    wbWriteNoTags: '当前预设里没有可写的标签。先在预设里给任务配「提取标签」，或在最终注入指令里写 {{标签}}。',
+    wbWriteEnabled: '启用',
+    wbWriteEntryNamePlaceholder: (tagName: string) => `默认：${tagName}`,
+    wbWriteDepthHint: '深度 = 插入深度（系统深度消息），默认 2，照工作流助手。',
+    wbWriteOrderHint: '顺序 = 插入顺序，越小越靠前，默认 10000，照工作流助手。',
+    wbWriteRemove: '删',
+    wbWriteCleanCurrent: '只清当前角色卡的',
+    wbWriteCleanAll: '清理本机所有世界书的',
+    wbWriteCleanHint:
+      '「只清当前角色卡的」删角色卡绑定书里、按当前规则名认得出的条目；手动写进别的书的条目不归它管。「清理本机所有世界书的」按 plot_assistant- 前缀扫本机全部书，改名或删规则留下的孤儿也要靠它清。两个按钮都绝不会碰你手写的条目。',
+    wbWriteCleanCurrentConfirm:
+      '删掉当前角色卡绑定的世界书里、本脚本写入的条目？只删按当前规则名认得出的条目，你手写的条目不动。',
+    wbWriteCleanAllConfirm:
+      '扫本机全部世界书，删掉所有名字以 plot_assistant- 开头的条目？你手写的条目不动；改名或删规则留下的孤儿也会一并删掉。',
+    wbWriteCleanDone: (deleted: number, books: number) => `清理完成：删了 ${deleted} 条，涉及 ${books} 本书`,
+    wbWriteCleanNone: '没有找到要删的条目。',
+    wbWriteCleanFail: (message: string) => `清理失败：${message}`,
     apisKeyHint:
       '密钥存在酒馆的脚本变量里，存之前会做一层混淆，面板与日志一律打码显示。这层混淆只能防「截图 / 贴给别人时不小心露出来」，不是加密——能跑脚本读你浏览器存储的人照样拿得到。',
     apisNoActive:
@@ -627,6 +698,138 @@ export const UI = {
 
     /** 预设读不到的说明 */
     presetProblemPrefix: '读不到预设：',
+  },
+  /** 「使用说明」页（批 46 重写：按功能区讲透机制，玩家看用法、创作者看规则） */
+  usage: {
+    intro:
+      '这里按功能区整理剧情推进助手的用法与机制。顶部按钮切换区域；这一页只看说明，不会改动任何设置。玩家看「快速上手」就够了；做预设的创作者请把「任务与楼层」「标签与差量更新」读完——里面是脚本认的全部规则。',
+    tabs: {
+      start: '快速上手',
+      stash: '暂存区',
+      tasks: '任务与楼层',
+      tagDiff: '标签与差量更新',
+      worldbook: '世界书写入',
+      placeholders: '占位符',
+    },
+
+    // ── ① 快速上手 ──
+    startTitle: '快速上手',
+    startIntro:
+      '剧情推进是一套独立于主对话的推进引擎：它把你预设里的一组「任务」按阶段依次发给 AI，把回传整理成剧情资料（角色信息、状态、剧情判定……），注入后续上下文，让主对话的 AI 拿着最新资料接着写。',
+    startPoints: [
+      '怎么触发一轮：正常发消息就行。发送会被引擎接住，先跑任务、再把最终注入指令写进你的楼层——你只管聊，任务在后台排队。',
+      '进度在哪看：左侧「剧情推进 → 运行日志」按轮记着每个任务的提示词、回传、耗时与报错；跑到一半关页面也不怕，已成功的任务落了账，下次发送接着跑。',
+      '结果在哪看/改：「剧情推进 → 暂存」页按楼层列出每一轮成果，能改文字、按标签删块、切版本、重跑。',
+      '资料给谁用：成果里的标签块按预设的「最终注入指令」写进楼层，后续对话通过占位符（见「占位符」页）引用它们；开了「标签块写入世界书」的还会同步进世界书长期在场（见「世界书写入」页）。',
+      '和左侧「推进重刷」的关系：那是另一套功能（抓取/重刷主对话楼层用的），与剧情推进互不干涉，各用各的设置。',
+    ],
+
+    // ── ② 暂存区 ──
+    stashTitle: '暂存区',
+    stashIntro:
+      '剧情推进每一轮的成果会先落进暂存区，按用户楼层记账；换一个聊天文件就是另一份账，不会串。这一页讲清它的存放规则，以及「再点一次发送，是接着跑还是重头跑」的判定机制。',
+    stashPoints: [
+      '两种存放模式：升级模式（默认）成果记在本脚本自己的账本（聊天变量）里，楼层正文只放最终注入指令；qrf 模式成果直接写进楼层的 qrf_plot 字段，与数据库脚本那套兼容，一层一版、没有暂存页。',
+      '容量：每个用户楼层最多留两版，第三版会挤掉最旧的那版；账本最多挂最近 3 个用户楼层。',
+      '版本编号跟着内容走：删掉「第 1 版」后「第 2 版」还叫第 2 版；再跑出新结果补的是空出来的「第 1 版」号。',
+      '编辑与保存：点开一版可以改正文、按标签删块；所有改动先落在草稿，点「保存」才写进账本；改的是「使用中」那版时楼层正文会跟着更新。',
+      '删掉某个标签块后，缺的这块会在下次拿这一版生成楼层时自动重跑产出它的任务补回来；改了「使用中」版本的内容还会同步进世界书（见「世界书写入」页）。',
+      '楼层被删了账不会丢：对账时这些账搬进孤儿区（最多留 3 份，满了淘汰最旧的），只搬不删；导出文件时孤儿账也会一并带上。',
+      '导出与导入：导出存成一个 json 文件，可以带到别的聊天文件导入；导入按楼层号重新挂到最新几层用户楼层上（最多回溯三层，一层都没有就挂第 0 层），目标楼层已有账会先问你再覆盖。',
+    ],
+    stashMatchTitle: '再点一次发送，是接着跑还是重头跑？',
+    stashMatchIntro:
+      '脚本拿你这次发送的楼层正文和账本里的记录比对来决定。判定口径（2026-11-04 定）：**去掉首尾空白后，开头十个字符一样就算「同一段输入」**——所以重新发送、或在原话基础上补了几个字，都还能接上进度；不足十个字的输入要求完全一致。各种情形的走向如下：',
+    stashMatchRules: [
+      { input: '这一层已经有完整成果（正文里已含某一版全文）', result: '再点发送 = 重新开始全新一轮。' },
+      {
+        input: '这一层还没跑完，开头十个字符一致',
+        result: '断点续跑：已经落盘的任务不再重发，只跑还没完成的任务；阶段 2 还能直接拿到阶段 1 的产出。',
+      },
+      {
+        input: '这一层还没跑完，但开头十个字符不一致（你改了输入）',
+        result: '仍然认这一层的账（锚本来就是楼层号），照常续跑。',
+      },
+      {
+        input: '全新楼层，正文里整段带着某一版成果（例如用「重跑正文」把它放回输入框后发送）',
+        result: '识别出你重发的是哪一版：只补跑产出被删标签块的那几个任务，其余不重跑。',
+      },
+      {
+        input: '全新楼层，另一层有没跑完的账且开头十个字符一致',
+        result: '把那层的进度搬到新楼层接着跑（多条候选接最近用过的）。',
+      },
+      { input: '全新楼层且以上都不匹配', result: '全新一轮，从第一个任务跑起。' },
+    ],
+    stashMatchNote:
+      '判定是「每跑完一个任务落一次账」的：中途关页面、切聊天、脚本重载，已成功的任务都在账上，回来接着跑就行。qrf 模式没有这套账，每次都是整轮。',
+
+    // ── ③ 任务与楼层 ──
+    tasksTitle: '任务与楼层',
+    tasksIntro:
+      '一套预设就是一组「任务」。引擎每轮按阶段分组：同一阶段的任务并发发给 AI，上一阶段全部回来才进下一阶段；任务产出的标签块拼成这一轮的成果。这一页给创作者讲清每个字段与触发规则（编辑入口：剧情推进 → 预设与开关 → 编辑这份预设）。',
+    taskFields: [
+      { name: '启用', desc: '关掉的任务这一轮直接跳过，不占调用、也不留日志。' },
+      { name: '阶段', desc: '阶段从小到大依次执行（阶段 1 全跑完才进阶段 2）；同一阶段内的任务同时并发，没有先后之分。后阶段任务的提示词里可以引用前阶段的产出。' },
+      { name: '抽取标签', desc: '这个任务负责产出哪些标签（如 recall、character_info）。回传里按 <标签名>…</标签名> 抽取；这里列出的标签必须全部回传，少一个就算这个任务失败。失败后按任务设置的重试上限重试，次数用尽仍缺就按任务失败处理：这一轮不注入，输入框保留原文，已回传的标签先存进暂存区。' },
+      { name: '只进字段', desc: '写在这里的标签只存进数据、不写进最终注入正文——适合纯后台记录，不占正文 token。注意：它同样要完整回传，只是不进正文；少一个照样算任务失败。' },
+      { name: '最短长度 / 重试上限', desc: '回传字数低于下限视为失败，按任务设置的重试上限重试；次数用尽仍失败则该任务判失败，这一轮不注入，原文退回输入框。' },
+      { name: '每 N 楼（触发周期）', desc: '不填=每条用户楼层都跑；填 N=每隔 N 条用户楼层跑一次。只数用户发的楼层（被隐藏的也算），AI 回复不算。每个任务自己记锚点：任务成功跑完，就在那条用户楼层上单独打一个记号；下次发送时从最新楼层往回数，隔够 N 条才再跑。' },
+      { name: '单独 API', desc: '这个任务可以指定走设置里哪一条 API（不填用「当前 API」）。适合把便宜模型留给轻任务、贵模型留给重任务。' },
+      { name: '任务说明', desc: '纯备注，给自己看的，不进提示词。' },
+    ],
+    taskPoints: [
+      '怎么算隔了几楼：从最新一条用户楼层往回数，只看用户发的（被隐藏的也算），AI 回复跳过。每个任务只找自己的锚点，遇到就停；隔了 N 条或更多就跑，一条锚点都找不到就当第一次、一定跑。锚点写在楼层上，删层重刷时它跟着那条楼层一起消失，更早的锚点还在，所以连续重刷不会把本该隔开的任务挤到一起。',
+      '哪些任务会跑：启用的、（设了间隔的话）已隔够楼层的任务。全部任务都没到期时，这次发送不发生任何 AI 调用、也不留运行日志。',
+      '任务提示词里可以写占位符（$1…$9、{{标签}} 等，见「占位符」页），发送前替换；任务级还有自己的最终注入模板，决定它的产出怎么进正文。',
+      '任务回传里只有 <标签名> 包住的段落会被抽取；标签差量（见下一页）决定这些回传怎么与上一轮合并。断点续跑按任务记账：每个任务抽到过哪些标签都留在账上，阶段 2 续跑时直接拿阶段 1 的产出，不用重跑。',
+    ],
+
+    // ── ④ 标签与差量更新 ──
+    tagDiffTitle: '标签与差量更新',
+    tagDiffIntro:
+      '标签差量按标签单独设置（入口：预设编辑器 → 标签差量）。开启后，AI 不用每轮重写全部内容，只写有变化的部分，脚本按上一轮内容自动合并。这一页列全四种模式的行为，以及 AI 回传里可以用的全部命令——写预设时把这些规则写进任务提示词，AI 就会照着输出。',
+    tagDiffModes: [
+      { name: '关闭（每轮全量）', desc: '每轮输出完整内容，整块替换。适合 basic_info、plot_judge 这类每轮都变的快照。' },
+      { name: '整标签保留', desc: '本轮没输出这个标签、或只回了个【无变化】，就沿用上一轮；输出了就整块替换。' },
+      { name: '按块合并', desc: '按 ### 标题分块合并：AI 只写有变化的块，块内只写有变化的小节；没提到的块/小节保留上一轮。' },
+      { name: '按表格行合并', desc: 'Markdown 表格按第一列作行键：AI 只写有变化的行，【删除】行名可删行，没提到的行保留上一轮。' },
+    ],
+    tagDiffCommandsTitle: 'AI 可用的命令（回传里写这些，脚本认）',
+    tagDiffCommands: [
+      { syntax: '【无变化】', where: '整个回传或单个标签', effect: '等价于没输出：这个标签沿用上一轮内容。' },
+      { syntax: '### 角色名', where: '按块合并', effect: '开一个角色块；### [角色名] 与它等价，同名块（去方括号后）按标题匹配替换。' },
+      { syntax: '【小节名】', where: '按块合并的块正文里', effect: '只写有变化的小节（如【信息边界】【短期记忆】【长期记忆】），脚本按小节整节替换；一个【小节】都没写 = 对整块做完整替换。' },
+      { syntax: '【删除】名字', where: '按块 / 按表格行合并', effect: '删除一个角色块；在表格模式下删除表里第一列匹配的行。' },
+      { syntax: '【移入 标签名】', where: '按块合并的块正文里', effect: '把这一块移进指定的嵌套前台标签（例如【移入 character_archive】）。' },
+      { syntax: '【移出】', where: '按块合并的块正文里', effect: '把这一块移回外层（后台）。' },
+      { syntax: '【状态】前台 / 【状态】后台', where: '旧格式兼容', effect: '没有【移入/移出】时仍然认，由上一轮内容里检测到的前台标签兜底映射。' },
+      { syntax: '整行 <标签名> / </标签名>', where: '按块合并的回传里', effect: '前台/后台分区标记：写在一对标签之间的块属于前台（会进正文），外面的属于后台。' },
+    ],
+    tagDiffPoints: [
+      '差量只改变「任务回传怎么落盘、怎么与上一轮合并」，不改变 AI 本轮正文的写法——正文里注入什么仍由最终注入指令与占位符决定。',
+      '按块合并的铁律：写了哪个小节，就要写出这个小节更新后的**完整**内容——脚本按小节整节替换，只写新增条目会把旧内容冲掉。',
+      '按表格行合并的铁律：补丁必须带**表头和分隔行**，脚本靠表头定位是哪张表；行键是第一列（角色名），改行就整行重写，加行直接写新行。',
+      '上一轮的格式和当前模式对不上（例如 character_info 上一轮还是表格、这轮改成了按块合并）时，本轮会自动要求全量输出并整份替换，不会拿旧格式硬合并。',
+      '只写非「关闭」的标签，关闭的标签不占配置；差量开启的标签在断点续跑时同样按任务粒度记账。',
+    ],
+
+    // ── ⑤ 世界书写入 ──
+    worldbookTitle: '标签块写入世界书',
+    worldbookIntro:
+      '一轮推进落盘后，可以把规则选中的标签块写成世界书条目，让「大包裹」拆成「一张便条 + 书架上的资料」——正文里只留轻的，重的资料长期挂在世界书里供 AI 随时读取。入口：剧情推进第 2 页「标签块写入世界书」。',
+    worldbookPoints: [
+      '写入时机：每轮推进成功落盘后自动写；你在暂存区改「使用中」版本的内容、或把另一版「应用到楼层」后，世界书条目会跟着改成那份内容。',
+      '条目形态：固定加 plot_assistant- 前缀，蓝灯常驻（永远在场）、系统角色、深度默认 2 / 顺序默认 10000、双向防递归——照工作流助手同款。',
+      '账本与对账：条目的「有没有、有哪些」记在本聊天的账本里，按「聊天 + 角色卡」对账。换聊天或换卡，旧条目自动清掉；切回来自动恢复，不用手动管。',
+      '改了规则怎么生效：停用一条规则后，下次重算会把它的条目清掉（内容仍留在账本里，重新启用后会按账本恢复）；给规则改条目名等于换了一个新名字——旧条目不再被认领（走手动清理），新条目按新名字写。',
+      '不重复注入：托管条目在世界书触发里被屏蔽（$1/$9 都不再展开它们），不会和任务 {{标签}} 的正文注入重复。',
+      '清理按钮两档：「只清当前角色卡的」扫角色卡绑定的书，按当前规则推导的完整条目名认领；「清理本机所有世界书的」按 plot_assistant- 前缀全盘扫（能兜住改名/删规则留下的孤儿）。都有二次确认，用户手写的条目一律不碰。',
+    ],
+
+    // ── ⑥ 占位符 ──
+    placeholderTitle: '占位符',
+    placeholderNote:
+      '这些占位符写在任务提示词或最终注入指令里，发送前会被换成实际内容。酒馆原生宏也可以直接写：<user>、{{user}}、<char>、{{char}}，同样会在发送前替换成当前用户名和角色名。',
   },
   gestureRows: {
     tap: '单击',
@@ -686,7 +889,7 @@ export const UI = {
     discard: '放弃修改',
     unsaved: '有改动还没保存',
     close: '关闭',
-    sections: '切换功能（推进重刷 / 剧情推进）',
+    sections: '切换功能（剧情推进 / 推进重刷 / 使用说明）',
     reset: '恢复默认',
     clearLog: '清掉以上记录',
   },

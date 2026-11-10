@@ -1,0 +1,590 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   面板自身样式。凡“颜色 / 背景 / 边框 / 阴影 / 字体族”都带 !important，
+   以压过主题与美化包同样带 !important 的裸标签规则。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.rh-card {
+  width: 480px;
+  max-width: calc(100vw - 32px);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--rh-bg) !important;
+  color: var(--rh-fg) !important;
+  border: 1px solid var(--rh-card-edge) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 20px 60px var(--rh-shadow) !important;
+  overflow: hidden;
+}
+
+/* ── 左侧功能列 + 右侧内容区 ──
+   加了功能列之后面板要更宽：480px 是原来只有一列标签栏时的宽度，塞不下"左列 + 内容"。 */
+.rh-card {
+  /* 默认铺满视口，照数据库脚本 `.acu-window.maximized` 的规格：
+     四周留 10px（窄屏 5px，见下面的 1100px 断点；≤720px 那条已改成真全屏、不留边距）。
+     面板里五页内容又多又长，收成一张小窗时每页都得缩着滚。 */
+  width: calc(100vw - 20px);
+  max-width: none;
+  height: calc(100vh - 20px);
+  height: calc(100dvh - 20px);
+  max-height: none;
+}
+
+@media screen and (max-width: 1100px) {
+  .rh-mask {
+    padding: 5px !important;
+  }
+
+  .rh-card {
+    width: calc(100vw - 10px);
+    height: calc(100vh - 10px);
+    height: calc(100dvh - 10px);
+    border-radius: 8px !important;
+  }
+}
+
+.rh-body-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0; /* 让下面的滚动区能真正滚起来，而不是把卡片撑高 */
+}
+
+.rh-main-col {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 功能列：竖排两个按钮，选中那个左侧亮一条紫杠 */
+.rh-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 0 auto;
+  width: 108px;
+  padding: 12px 8px;
+  border-right: 1px solid var(--rh-line-soft) !important;
+  background-color: var(--rh-bg-soft) !important;
+}
+
+.rh-rail-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid transparent !important;
+  border-radius: 9px !important;
+  background: transparent !important;
+  color: var(--rh-fg-mid) !important;
+  font-family: var(--rh-font) !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.rh-rail-btn:hover {
+  background-color: var(--rh-bg-hover) !important;
+  color: var(--rh-fg) !important;
+}
+
+.rh-rail-btn.active {
+  background-color: var(--rh-accent-wash) !important;
+  border-color: var(--rh-accent-ring) !important;
+  color: var(--rh-accent-deep) !important;
+  font-weight: 600 !important;
+}
+
+.rh-rail-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background-color: var(--rh-line-dashed) !important;
+  transition: background-color 0.15s, box-shadow 0.15s;
+}
+
+.rh-rail-btn.active .rh-rail-dot {
+  background-color: var(--rh-accent) !important;
+  box-shadow: 0 0 0 3px var(--rh-accent-ring);
+}
+
+
+.rh-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--rh-line-soft) !important;
+}
+
+.rh-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+/* 主题选择：右上角，跟工作流助手的主题开关同一位置 */
+.rh-theme-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--rh-fg-dim) !important;
+}
+
+.rh-theme-sel {
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--rh-fg) !important;
+  background-color: var(--rh-bg-pure) !important;
+  border: 1px solid var(--rh-line-input) !important;
+  border-radius: 8px !important;
+  cursor: pointer;
+}
+
+.rh-theme-sel:focus {
+  outline: none !important;
+  border-color: var(--rh-accent) !important;
+  box-shadow: 0 0 0 2px var(--rh-accent-ring) !important;
+}
+
+.rh-card-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--rh-fg) !important;
+}
+
+/* 自绘刷新图标：不依赖酒馆的 FontAwesome 字体，酒馆换 FA 版本也不会失效 */
+.rh-ico {
+  width: 1em;
+  height: 1em;
+  flex: none;
+  display: inline-block;
+  vertical-align: -0.1em;
+}
+
+.rh-ico path {
+  fill: none !important;
+  stroke: currentColor !important;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rh-card-title .rh-ico {
+  margin-right: 6px;
+  color: var(--rh-accent) !important;
+}
+
+.rh-x {
+  border: none !important;
+  border-color: transparent !important;
+  background-color: transparent !important;
+  color: var(--rh-fg-dim) !important;
+  font-size: 20px !important;
+  line-height: 1 !important;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+  box-shadow: none !important;
+}
+
+.rh-x:hover {
+  background-color: var(--rh-bg-hover) !important;
+  color: var(--rh-fg) !important;
+}
+
+.rh-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--rh-line-soft) !important;
+}
+
+.rh-tab {
+  border: none !important;
+  border-color: transparent !important;
+  background-color: transparent !important;
+  color: var(--rh-fg-dim) !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-radius: 8px 8px 0 0 !important;
+  border-bottom: 2px solid transparent !important;
+  box-shadow: none !important;
+}
+
+.rh-tab.active {
+  color: var(--rh-accent) !important;
+  border-bottom-color: var(--rh-accent) !important;
+}
+
+.rh-card-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px;
+  /* 滚到底/顶后不再把滚动甩给面板身后的酒馆页面。这只是边界卫生，
+     划选疯滚的正解是 SettingsPanel 里的「拖选冻结守卫」（见 2026-11-08 批 43）。 */
+  overscroll-behavior: contain;
+}
+
+.rh-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rh-note {
+  margin: 0 !important;
+  font-size: 12px !important;
+  color: var(--rh-fg-dim) !important;
+  line-height: 1.55 !important;
+  white-space: pre-line !important;
+}
+
+.rh-note-alert {
+  color: var(--rh-danger) !important;
+  font-weight: 600;
+}
+
+.rh-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rh-line label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--rh-fg-soft) !important;
+}
+
+.rh-line select,
+.rh-field input,
+.rh-form input,
+.rh-form textarea {
+  border: 1px solid var(--rh-line-input) !important;
+  border-radius: 8px !important;
+  padding: 6px 8px;
+  font-size: 13px !important;
+  background-color: var(--rh-bg-soft) !important;
+  color: var(--rh-fg) !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.rh-line select:focus,
+.rh-field input:focus,
+.rh-form input:focus,
+.rh-form textarea:focus {
+  border-color: var(--rh-accent) !important;
+  box-shadow: 0 0 0 3px var(--rh-accent-ring) !important;
+}
+
+.rh-pair {
+  display: flex;
+  gap: 16px;
+  margin-top: 6px;
+}
+
+.rh-trio {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.rh-trio .rh-field input {
+  width: 68px;
+}
+
+.rh-split {
+  height: 1px;
+  margin: 4px 0;
+  background-color: var(--rh-line-soft) !important;
+}
+
+.rh-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--rh-fg-soft) !important;
+}
+
+.rh-field input {
+  width: 64px;
+  text-align: center;
+}
+
+.rh-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--rh-line) !important;
+  border-radius: 12px !important;
+  background-color: var(--rh-bg-soft) !important;
+  cursor: grab;
+  /* 触屏上条目本身仍可上下滑动列表，只有按住的 ⠿ 才转成拖拽 */
+  touch-action: pan-y;
+}
+
+/* 正在被拖的那一条：留在流里（顺序已实时换好），只做醒目标记 */
+.rh-item.pulling {
+  cursor: grabbing;
+  border-color: var(--rh-accent) !important;
+  background-color: var(--rh-accent-wash) !important;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 16%) !important;
+}
+
+/* 拖到手势进行中：整块列表禁掉文字选中，免得拖一次就糊蓝一片 */
+.rh-pick {
+  user-select: none;
+}
+
+.rh-grip {
+  color: var(--rh-fg-faint) !important;
+  font-size: 14px;
+  line-height: 1;
+  user-select: none;
+  /* 内边距把可抓方块撑到约 26×30px，再用负 margin 抵回来：⠿ 的字形位置与改前一致
+     （上缘 -5 + 8 = 原来那条 margin-top: 3px 的效果） */
+  padding: 8px 6px;
+  margin: -5px -6px 3px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.rh-rank {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 50% !important;
+  background-color: var(--rh-accent) !important;
+  color: var(--rh-bg) !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  line-height: 20px;
+  text-align: center;
+}
+
+.rh-item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.rh-item-name {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--rh-fg) !important;
+}
+
+.rh-item-pattern {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--rh-font-mono) !important;
+  font-size: 12px !important;
+  color: var(--rh-fg-mid) !important;
+  background-color: var(--rh-bg-pure) !important;
+  border: 1px solid var(--rh-line) !important;
+  border-radius: 6px !important;
+  padding: 3px 6px;
+  overflow-wrap: anywhere;
+}
+
+.rh-item-note {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--rh-fg-dim) !important;
+}
+
+.rh-item-ops {
+  display: flex;
+  gap: 4px;
+}
+
+.rh-item-ops button {
+  border: 1px solid var(--rh-line) !important;
+  background-color: var(--rh-bg-pure) !important;
+  color: var(--rh-fg-soft) !important;
+  border-radius: 6px !important;
+  font-size: 13px !important;
+  box-shadow: none !important;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.rh-item-ops button:hover {
+  background-color: var(--rh-accent-wash) !important;
+  color: var(--rh-accent-deep) !important;
+}
+
+.rh-plus {
+  align-self: flex-start;
+  border: 1px dashed var(--rh-line-dashed) !important;
+  background-color: transparent !important;
+  color: var(--rh-accent) !important;
+  font-size: 13px !important;
+  padding: 6px 12px;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+  cursor: pointer;
+}
+
+.rh-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--rh-accent) !important;
+  border-radius: 12px !important;
+  background-color: var(--rh-accent-wash-soft) !important;
+}
+
+.rh-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rh-form-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--rh-fg-mid) !important;
+}
+
+.rh-form-tip {
+  font-size: 11px;
+  color: var(--rh-fg-faint) !important;
+}
+
+.rh-form-pattern {
+  font-family: var(--rh-font-mono) !important;
+}
+
+.rh-form textarea {
+  resize: vertical;
+  min-height: 48px;
+}
+
+.rh-form-ops {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.rh-form-ops button {
+  border: 1px solid var(--rh-line-input) !important;
+  background-color: var(--rh-bg-pure) !important;
+  color: var(--rh-fg-soft) !important;
+  border-radius: 8px !important;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 13px !important;
+  box-shadow: none !important;
+}
+
+.rh-form-ops button:hover:not(:disabled) {
+  background-color: var(--rh-accent-wash) !important;
+  color: var(--rh-accent-deep) !important;
+}
+
+.rh-form-ops button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rh-logbox {
+  position: relative;
+  margin-top: 8px;
+}
+
+.rh-log {
+  width: 100%;
+  height: 200px;
+  resize: none;
+  border: 1px solid var(--rh-line) !important;
+  border-radius: 10px !important;
+  padding: 10px;
+  font-family: var(--rh-font-mono) !important;
+  font-size: 11px !important;
+  line-height: 1.5 !important;
+  background-color: var(--rh-bg-soft) !important;
+  color: var(--rh-fg-soft) !important;
+  outline: none !important;
+  box-shadow: none !important;
+  white-space: pre-wrap !important;
+}
+
+.rh-log-wipe {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  border: none !important;
+  border-color: transparent !important;
+  background-color: var(--rh-scrim-btn) !important;
+  color: var(--rh-bg) !important;
+  border-radius: 6px !important;
+  padding: 3px 8px;
+  font-size: 11px !important;
+  box-shadow: none !important;
+  cursor: pointer;
+}
+
+.rh-card-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--rh-line-soft) !important;
+}
+
+/* 「有改动还没保存」——靠左顶住，别把右边四个按钮挤乱（窄屏时它会独占一行） */
+.rh-dirty-hint {
+  margin-right: auto;
+  align-self: center;
+  font-size: 12px;
+  color: var(--rh-danger);
+  white-space: nowrap;
+}
+
+.rh-act {
+  border: none !important;
+  border-color: transparent !important;
+  border-radius: 10px !important;
+  padding: 8px 14px;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  box-shadow: none !important;
+  cursor: pointer;
+}
+
+.rh-act-plain {
+  background-color: var(--rh-bg-hover) !important;
+  color: var(--rh-fg-mid) !important;
+}
+
+.rh-act-plain:hover {
+  background-color: var(--rh-line) !important;
+}
+
+.rh-act-go {
+  background-color: var(--rh-accent) !important;
+  color: var(--rh-bg) !important;
+}
+
+.rh-act-go:hover {
+  background-color: var(--rh-accent-deep) !important;
+}
+
+

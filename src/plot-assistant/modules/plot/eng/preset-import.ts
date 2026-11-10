@@ -18,15 +18,15 @@
 
 import type { BoundaryRule } from './context-tags';
 import { normalizeRules } from './context-tags';
-import type { PlotPromptSegment, PlotTask } from './task-model';
-import { legacyPromptFromThree, normalizeTasks } from './task-model';
+import type { PlotTask } from './task-model';
+import { normalizeTasks } from './task-model';
 import { normalizeTagDiffModes, type TagDiffMode } from './tag-diff';
 
 /** 引擎整轮拿到的、来自某一份预设的全部配置。 */
 export interface PlotPresetConfig {
   /** 预设名。取不到就是空串（不是 `null`，省得调用方到处判空）。 */
   name: string;
-  /** 已经过 `normalizeTasks` 的任务表，按 `order` 升序。预设没写任务时是那条兜底任务。 */
+  /** 已经过 `normalizeTasks` 的任务表，按 `order` 升序。老格式预设（没写任务表）是空表。 */
   tasks: PlotTask[];
   /** 「最终注入指令」模板，里面的 `{{标签}}` 决定段落落在哪。 */
   directiveTemplate: string;
@@ -43,20 +43,15 @@ export interface PlotPresetConfig {
   extractRules: BoundaryRule[];
   /** 从上下文里「删掉」的区间规则。 */
   excludeRules: BoundaryRule[];
-  /**
-   * 这份配置里的任务是不是兜底任务（预设里压根没配任务）。
-   * 界面可以据此提示「这份预设还没配任务」，而不是让用户以为任务丢了。
-   */
-  usedFallbackTask: boolean;
 }
 
 export interface ImportPresetOptions {
-  /** 兜底任务用的提示词组构造器。不传就用 `buildEmptyPromptGroup`（A/B 两槽留空）。 */
-  buildDefaultPromptGroup?: (init: { mainAContent?: string; mainBContent?: string }) => PlotPromptSegment[];
-  /** 兜底任务的名字，默认「默认任务」。 */
-  fallbackTaskName?: string;
   /** `contextTurnCount` 缺失时的默认值，默认 1。 */
   defaultContextTurnCount?: number;
+  /** 预设没写提取规则时退回的全局兜底（`$7 默认上下文`）。 */
+  defaultExtractRules?: BoundaryRule[];
+  /** 预设没写排除规则时退回的全局兜底（`$7 默认上下文`）。 */
+  defaultExcludeRules?: BoundaryRule[];
 }
 
 /** ACU 里 `plotSettings.contextTurnCount ?? 1` 的那个 1。 */
@@ -76,27 +71,18 @@ export function presetNameOf(preset: unknown): string {
 }
 
 /**
- * 最终注入指令模板。三级回退，顺序照抄
+ * 最终注入指令模板。两级回退，顺序照抄
  * `getPlotFinalDirectiveFromSource_ACU`（`src/service/plot/plot-logic.ts:116`）：
- * `finalSystemDirective` → `finalDirective` → 提示词组里 id 为 `finalSystemDirective` 的那一段。
+ * `finalSystemDirective` → `finalDirective`。
  *
- * [差异] 上游第 3、4 两级其实是同一件事：它先 `ensurePlotPromptsArray_ACU` 把老式对象
- * 转成数组，再按 id 查；而 `legacyPromptFromThree` 直接吃两种形态（数组按 id、对象按 key），
- * 所以这里只写一次。结果一致，少一次 mutate。
- *
- * [差异] 上游用 `||` 直接把值串起来，字段里塞了非字符串（比如数字）会原样传出去；
- * 这里非字符串一律当「没写」，继续往下回退。
+ * 老预设那种「prompts 三段里按 id 查 finalSystemDirective」的第三级已移除：
+ * 那种预设在引擎入口会被显式拦下并报错。
  */
 export function readDirectiveTemplate(preset: unknown): string {
   const record = asRecord(preset);
   if (!record) return '';
   const pick = (value: unknown): string => (typeof value === 'string' ? value : '');
-  return (
-    pick(record.finalSystemDirective) ||
-    pick(record.finalDirective) ||
-    legacyPromptFromThree(record.prompts, 'finalSystemDirective') ||
-    ''
-  );
+  return pick(record.finalSystemDirective) || pick(record.finalDirective) || '';
 }
 
 /**
@@ -116,45 +102,49 @@ export function readContextTurnCount(preset: unknown, fallback = DEFAULT_CONTEXT
   return Math.max(0, Math.floor(value));
 }
 
-/** 提取规则。新式 `contextExtractRules` 优先，退回老式 `contextExtractTags`。 */
-export function readExtractRules(preset: unknown): BoundaryRule[] {
+/**
+ * 提取规则。新式 `contextExtractRules` 优先，退回老式 `contextExtractTags`；
+ * 预设一条都没写时，才用全局「`$7 默认上下文`」那份。
+ */
+export function readExtractRules(preset: unknown, fallback: BoundaryRule[] = []): BoundaryRule[] {
   const record = asRecord(preset);
-  if (!record) return [];
+  if (!record) return fallback.slice();
   const legacyTags = typeof record.contextExtractTags === 'string' ? record.contextExtractTags : '';
-  return normalizeRules(record.contextExtractRules, legacyTags);
+  const rules = normalizeRules(record.contextExtractRules, legacyTags);
+  return rules.length > 0 ? rules : fallback.slice();
 }
 
-/** 排除规则。新式 `contextExcludeRules` 优先，退回老式 `contextExcludeTags`。 */
-export function readExcludeRules(preset: unknown): BoundaryRule[] {
+/**
+ * 排除规则。新式 `contextExcludeRules` 优先，退回老式 `contextExcludeTags`；
+ * 预设一条都没写时，才用全局「`$7 默认上下文`」那份。
+ */
+export function readExcludeRules(preset: unknown, fallback: BoundaryRule[] = []): BoundaryRule[] {
   const record = asRecord(preset);
-  if (!record) return [];
+  if (!record) return fallback.slice();
   const legacyTags = typeof record.contextExcludeTags === 'string' ? record.contextExcludeTags : '';
-  return normalizeRules(record.contextExcludeRules, legacyTags);
+  const rules = normalizeRules(record.contextExcludeRules, legacyTags);
+  return rules.length > 0 ? rules : fallback.slice();
 }
 
 /**
  * 一份预设 → 一份引擎配置。
  *
- * 任务那一段完全交给 `normalizeTasks`：它已经能吃新式 `plotTasks[]`、
- * 老式「整份设置当任务」和「空」三种来源，所以这里把整个预设递进去就够了
- * （`plotTasks` 为空时它会用预设自身的 `mainPrompt`/`systemPrompt`/`extractTags` 拼兜底任务，
- * 与 `buildLegacyWrappedPlotTask_ACU` 的做法一致）。
+ * 任务只认新式 `plotTasks[]`。老格式预设（没有任务表，正文只写在
+ * `mainPrompt` / `systemPrompt` 或 prompts 三段里）会得到一张空任务表，
+ * 引擎入口据此显式报「不支持老格式预设」，不再静默不跑。
  */
 export function importPresetConfig(preset: unknown, options: ImportPresetOptions = {}): PlotPresetConfig {
   const record = asRecord(preset);
   const base: Loose = record || {};
-  const rawTasks = Array.isArray(base.plotTasks) ? base.plotTasks : [];
-  const deps = options.buildDefaultPromptGroup ? { buildDefault: options.buildDefaultPromptGroup } : {};
 
   return {
     name: presetNameOf(base),
-    tasks: normalizeTasks(base, { fallbackTaskName: String(options.fallbackTaskName || '默认任务') }, deps),
+    tasks: normalizeTasks(base),
     directiveTemplate: readDirectiveTemplate(base),
     contextTurnCount: readContextTurnCount(base, options.defaultContextTurnCount ?? DEFAULT_CONTEXT_TURN_COUNT),
     tagDiffModes: normalizeTagDiffModes(record?.tagDiffModes),
-    extractRules: readExtractRules(base),
-    excludeRules: readExcludeRules(base),
-    usedFallbackTask: rawTasks.length === 0,
+    extractRules: readExtractRules(base, options.defaultExtractRules),
+    excludeRules: readExcludeRules(base, options.defaultExcludeRules),
   };
 }
 

@@ -28,8 +28,17 @@ import type { ChatStateStore } from './state';
 export const LOG_FLUSH_DELAY_MS = 400;
 
 export interface PlotLogWriter {
-  /** 开一轮。同一楼层重复开轮由 `startRound` 自己替换旧记录。 */
-  start(init: { floorId: number; roundIndex: number; presetName: string }): void;
+  /**
+   * 开一轮。`resume=true` 时保留同楼层上一轮已跑完的任务记录（断点续跑）；
+   * `rerunTaskIds` 是这一轮要重跑的任务，它们上一轮的旧记录会被摘掉。
+   */
+  start(init: {
+    floorId: number;
+    roundIndex: number;
+    presetName: string;
+    resume?: boolean;
+    rerunTaskIds?: string[];
+  }): void;
   /** 记一个任务的结果（成功与失败都记）。 */
   task(info: TaskLogInfo<PlotTask>): void;
   /** 收尾：写结束时间与整体状态，并且**立刻**落盘。 */
@@ -95,6 +104,8 @@ export function createLogWriter(options: LogWriterOptions): PlotLogWriter {
         floorId: Number(init.floorId),
         presetName: String(init.presetName ?? ''),
         startedAt: now(),
+        keepTasks: init.resume === true,
+        rerunTaskIds: init.rerunTaskIds,
       }).log;
       floorId = Number(init.floorId);
       scheduleFlush();

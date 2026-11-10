@@ -5,8 +5,10 @@
  * 角色卡绑定的主书 + 附加书，常驻条目（蓝灯）直接进，绿灯条目按关键词扫，
  * 扫进去的条目正文又能继续带出别的条目（递归），最后只把**条目正文**拼起来。
  *
- * `$1` 与 `$9` 都剔掉两类条目：名字像框架的（规则 / MVU / 变量 / 状态 / 思维链…，
- * 见 `BLOCKED_NAME_KEYWORDS`），以及大纲表与纪要索引（它们有 `$5` 专用占位符）。
+ * `$1` 与 `$9` 都剔掉三类条目：名字像框架的（规则 / MVU / 变量 / 状态 / 思维链…，
+ * 见 `BLOCKED_NAME_KEYWORDS`）、大纲表与纪要索引（它们有 `$5` 专用占位符）、
+ * 以及本脚本自己写入的托管条目（名字带 `plot_assistant-` 前缀，见
+ * `isManagedWorldbookEntry` —— 资料进了世界书就别在占位符里再展开一遍）。
  * `$9` 再多剔一层：数据库自己生成的条目
  * （comment 以 `TavernDB-ACU-` / `总结条目` / `小总结条目` / `重要人物条目` 开头）。
  * 所以这里**一次扫描两个出口**，与上游 `Promise.allSettled([...])` 的写法对应。
@@ -335,6 +337,26 @@ export function isBlockedByName(entry: Pick<WorldbookHitEntry, 'rawComment'>): b
 }
 
 /**
+ * 本脚本写入世界书的条目统一挂这个前缀（2026-11-07 批 38 用户定，**写死不可改**）。
+ *
+ * 完整条目名 = 前缀 + 条目名（默认标签名）。这个常量放在取数层而不是写入模块：
+ * 「别把自己写的资料再读一遍」的过滤要在这里生效，而这一层必须保持纯函数
+ * （`tools/plot-parity` 要单独编译它），不能反过来 import 碰酒馆全局的写入模块。
+ */
+export const PLOT_WB_WRITE_PREFIX = 'plot_assistant-';
+
+/**
+ * 名字带托管前缀 → 本脚本自己写的条目，不进 `$1` / `$9`。
+ *
+ * 为什么（批 37 用户定）：资料搬进世界书后，任务提示词里的世界书占位符会把它展开一遍，
+ * 与任务里 `{{标签}}` 的内容重复 —— 等于白搬还翻倍。与「不加防御代码」不冲突：
+ * 那条管用户楼层的注入，这条管脚本自己读世界书时别把自己写的再读一遍。
+ */
+export function isManagedWorldbookEntry(entry: Pick<WorldbookHitEntry, 'rawComment'>): boolean {
+  return String(entry.rawComment ?? '').trim().startsWith(PLOT_WB_WRITE_PREFIX);
+}
+
+/**
  * 这条「本来就不会进 `$1`」。
  *
  * 面板上要标出这批条目（用户在勾选框里看得见它们、但勾不勾都不影响生成），
@@ -349,11 +371,13 @@ export function isFrameworkEntry(entry: Pick<WorldbookHitEntry, 'rawComment' | '
 /**
  * 剧情推进专用的「进不进池」判定（对应 `plot-task-engine.ts:1333` 那组回调）。
  *
- * 三处照抄：
+ * 四处照抄：
  * - 大纲表条目与纪要索引条目**一律排除** —— 它们有专用占位符（`$5` 一族）。
  * - 名字含 `BLOCKED_NAME_KEYWORDS` 的**一律排除**，但数据库生成的条目不筛：
  *   那些名字里常带「变量」「状态」，可它们是数据不是框架。这条对应工作流助手
  *   `worldbook/content.ts:144` 的 `if (!autoIncluded && isEntryBlocked(entry)) continue;`。
+ * - 名字带托管前缀（`plot_assistant-`）的**一律排除** —— 那是本功能自己写进去的条目，
+ *   再读一遍就与任务里 `{{标签}}` 的内容重复（2026-11-07 批 37 用户定）。
  * - `enabledEntries` 为空的按「全选」处理；非空时按「这本书的 uid 列表」筛。
  *
  * agent 绿名单（`agentGreenlights`）属于第 7 期，没开 agent 时它本来就是空集，先不做。
@@ -368,7 +392,7 @@ export function createPlotFilters(options: {
   const hasAnySelection = !!enabledMap && typeof enabledMap === 'object' && Object.keys(enabledMap).length > 0;
 
   return {
-    includeEntry: entry => !isFrameworkEntry(entry),
+    includeEntry: entry => !isFrameworkEntry(entry) && !isManagedWorldbookEntry(entry),
     isSelected: entry => {
       if (!hasAnySelection) return true;
       if (isDatabaseGeneratedEntry(entry)) return true;

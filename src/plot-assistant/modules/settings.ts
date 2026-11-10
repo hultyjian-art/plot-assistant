@@ -8,6 +8,8 @@
  *    该形态没有 capture 段，缺字段一律取默认值。
  * 任何形态都先规整成当前形态再校验，校验失败则整份退回默认值。
  */
+import { isPlainObject } from './plot/guards';
+import { DEFAULT_MAX_TOKENS } from './constants';
 import { z } from 'zod';
 import { klona } from 'klona';
 import { obfuscateApiKey, unobfuscateApiKey } from './plot/api-key';
@@ -21,6 +23,7 @@ import type {
   CaptureSettings,
   PlotApiEntry,
   PlotContextRule,
+  PlotWorldbookWriteRule,
   RegexPreset,
   RerushContext,
   RerushSettings,
@@ -78,8 +81,6 @@ const PlotZ = z.object({
   }),
   /** 用户选定的剧情推进预设名（ACU 那边预设的名字）。空串 = 还没选。 */
   presetName: z.string(),
-  /** 已经跑到第几轮。触发轮次按它判断该不该跑。 */
-  roundIndex: z.number().int().min(0),
   /** 自己的一份 API 清单（与 ACU 的存储互不相干） */
   apis: z.array(
     z.object({
@@ -146,14 +147,6 @@ const PlotZ = z.object({
     }),
   ),
   /**
-   * 触发轮次的账本：`预设名::任务id` → 上次跑过的轮号（见 `plot/round-book.ts`）。
-   *
-   * 用 `z.record(z.string(), z.number())` 而不是更严的整数校验：这份数据是脚本自己写的，
-   * 但用户可能从旧版本升上来、也可能手改过变量 —— 校验太严会让**整份设置**回退默认，
-   * 那是比「一个脏账本」严重得多的损失。脏值在 `readTaskRuns` 里逐条丢掉。
-   */
-  taskRuns: z.record(z.string(), z.number()),
-  /**
    * 推进结果的存放方式（2026-11-03 用户定）：
    *
    * - `'upgrade'`：成果进聊天变量里的暂存账本（本脚本自己的账，支持每层两版、面板里改）。
@@ -163,6 +156,23 @@ const PlotZ = z.object({
    * 另一边不跟着动，就变成"账本说 A、楼层说 B"。切换时做一次单向迁移并把另一边清掉。
    */
   stashMode: z.enum(['upgrade', 'qrf']),
+  /**
+   * 世界书写入规则（2026-11-07 新增）：把规则选中的标签块写成世界书条目。
+   * 结构宽松校验：脏规则在 `readWorldbookWriteRules` 里逐条丢，不让整份设置退回默认。
+   */
+  worldbookWriteRules: z.array(
+    z.object({
+      tagName: z.string(),
+      entryName: z.string(),
+      depth: z.number(),
+      order: z.number(),
+      enabled: z.boolean(),
+    }),
+  ),
+  /** 条目写进哪本书：character = 角色卡绑定的（主书+附加书）；manual = 勾的那几本。 */
+  worldbookWriteSource: z.enum(['character', 'manual']),
+  /** 写入手动模式勾选的书名。 */
+  worldbookWriteBooks: z.array(z.string()),
 });
 
 export const SettingsZ = z.object({
@@ -212,15 +222,12 @@ export const FALLBACK_SETTINGS: RerushSettings = {
     // 没选预设时改的就是这一份；条数缺省 3，与 ACU 预设里的默认一致
     contextDefaults: { turnCount: 3, extractRules: [], excludeRules: [] },
     presetName: '',
-    roundIndex: 0,
     apis: [],
     activeApiName: '',
     // 默认 300 秒：和 ACU 一致。用户可能一次都没打开这个面板，那时也该有保护。
     requestTimeoutSeconds: PLOT_DEFAULT_TIMEOUT_SECONDS,
     // 默认空库：没导入过就回退到「实时读数据库脚本」，老用户升级后行为不变
     presets: [],
-    // 空账本 = 每个任务都是「第一次跑」。老用户升级后触发轮次一律按「每轮」跑，行为不变。
-    taskRuns: {},
     // 默认升级模式：账本在聊天变量里，楼层不写 qrf 字段（用户 2026-11-03 定）
     stashMode: 'upgrade',
     // 默认显示等待气泡（= 不解除伪装），与 ACU 的默认一致
@@ -230,6 +237,11 @@ export const FALLBACK_SETTINGS: RerushSettings = {
     worldbookBooks: [],
     // 空表 = 每本书都全选
     worldbookEntries: {},
+    // 世界书写入（2026-11-07）：默认没配规则 = 什么都不写，行为与加功能前一致；
+    // 目标书默认跟角色卡绑定走（与 `$1` 的读端口径一致）。
+    worldbookWriteRules: [],
+    worldbookWriteSource: 'character',
+    worldbookWriteBooks: [],
   },
 };
 
@@ -283,7 +295,7 @@ export function clampCount(value: number, fallback: number, min: number): number
 
 /** 旧版把正则按 pattern/flags 两个字段存，现在统一成一个 `/表达式/标志` 字面量。 */
 function toPreset(raw: Record<string, unknown>): RegexPreset {
-  const id = typeof raw.id === 'string' && raw.id !== '' ? raw.id : `preset_${Date.now()}`;
+  const id = typeof raw.id === 'string' && raw.id !== '' ? raw.id : `preset_${crypto.randomUUID()}`;
   const name = typeof raw.name === 'string' && raw.name !== '' ? raw.name : UI.unnamedPreset;
   const note = typeof raw.note === 'string' ? raw.note : '';
   if (typeof raw.regex === 'string' && raw.regex !== '') {
@@ -352,32 +364,13 @@ function asText(value: unknown): string {
 }
 
 /**
- * 触发轮次的账本。键是 `预设名::任务id`，值是轮号。
- *
- * 逐条丢脏值而不是整份丢掉：账本是「少跑一次不报错」的辅助数据，
- * 一条坏账最多让某个任务多跑一轮；整份清空却会让所有「每 N 轮」的任务
- * 集体回到第一次 —— 用户会发现自己的周期设置突然全部失效。
- */
-function readTaskRuns(raw: unknown): Record<string, number> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  const next: Record<string, number> = {};
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    const name = key.trim();
-    const round = Math.floor(Number(value));
-    if (!name || !Number.isFinite(round) || round < 1) continue;
-    next[name] = round;
-  }
-  return next;
-}
-
-/**
  * 世界书条目勾选表：`书名 → 允许注入的 uid 列表`。
  *
  * 空数组是**有意义的**（这本书一条都不注入），所以空表不能丢；
  * 而没有这个键才是「全选」。uid 一律存字符串，见 normalizePlot 里的说明。
  */
 function readEntrySelection(raw: unknown): Record<string, string[]> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  if (!isPlainObject(raw)) return {};
   const next: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     const name = key.trim();
@@ -395,10 +388,6 @@ function readPlot(raw: unknown): RerushSettings['plot'] {
     enabled: source.enabled === true,
     contextDefaults: readContextDefaults(source.contextDefaults),
     presetName: typeof source.presetName === 'string' ? source.presetName.trim() : '',
-    roundIndex:
-      typeof source.roundIndex === 'number' && Number.isFinite(source.roundIndex) && source.roundIndex >= 0
-        ? Math.floor(source.roundIndex)
-        : 0,
     apis: Array.isArray(source.apis) ? source.apis.map(readPlotApi).filter((api): api is PlotApiEntry => api !== null) : [],
     activeApiName: typeof source.activeApiName === 'string' ? source.activeApiName.trim() : '',
     // 缺省给 300 秒（与 ACU 的 API_REQUEST_TIMEOUT_DEFAULT_ACU 一致）。
@@ -412,7 +401,6 @@ function readPlot(raw: unknown): RerushSettings['plot'] {
           .map(readStoredPreset)
           .filter((preset): preset is RerushSettings['plot']['presets'][number] => preset !== null)
       : [],
-    taskRuns: readTaskRuns(source.taskRuns),
     // 缺省升级模式：老用户升级上来时，账本里已有的东西继续用，楼层不写 qrf。
     stashMode: source.stashMode === 'qrf' ? 'qrf' : 'upgrade',
     // 「解除发送伪装」默认关（= 显示等待气泡），与 ACU 的默认一致。
@@ -426,14 +414,56 @@ function readPlot(raw: unknown): RerushSettings['plot'] {
     // uid 统一存字符串 —— 酒馆助手给的 uid 有时是数字、有时是字符串，
     // 存成一种形式，比较时两边都 String()，才不会出现「勾了却永远不生效」。
     worldbookEntries: readEntrySelection(source.worldbookEntries),
+    // 世界书写入（2026-11-07）：老设置里没有这几项，缺了就按默认值补 ——
+    // 没规则 = 不写，目标书默认跟角色卡绑定走。
+    worldbookWriteRules: readWorldbookWriteRules(source.worldbookWriteRules),
+    worldbookWriteSource: source.worldbookWriteSource === 'manual' ? 'manual' : 'character',
+    worldbookWriteBooks: Array.isArray(source.worldbookWriteBooks)
+      ? source.worldbookWriteBooks
+          .filter((name): name is string => typeof name === 'string' && name.trim() !== '')
+          .map(name => name.trim())
+      : [],
   };
+}
+
+/**
+ * 世界书写入规则：逐条认，脏条目丢掉而不是整份清空。
+ *
+ * 规则是用户一条条配出来的，一条坏了（比如手改变量改坏了）只该丢那一条；
+ * 整份清空会让「我配了三条，改错一处就全没了」。tagName 为空的条目没有意义，直接丢。
+ */
+function readWorldbookWriteRules(raw: unknown): PlotWorldbookWriteRule[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PlotWorldbookWriteRule[] = [];
+  for (const item of raw) {
+    const rule = (item ?? {}) as Partial<PlotWorldbookWriteRule>;
+    const tagName = typeof rule.tagName === 'string' ? rule.tagName.trim() : '';
+    if (tagName === '') continue;
+    out.push({
+      tagName,
+      entryName: typeof rule.entryName === 'string' ? rule.entryName : '',
+      // 位置两个数只认正数：0/负数/脏值退回工作流助手的默认（深度 2 / 顺序 10000），
+      // 那是用户拍板要照抄的值（批 36），不是拍脑袋给的。
+      depth:
+        typeof rule.depth === 'number' && Number.isFinite(rule.depth) && rule.depth >= 1
+          ? Math.floor(rule.depth)
+          : 2,
+      order:
+        typeof rule.order === 'number' && Number.isFinite(rule.order) && rule.order >= 0
+          ? Math.floor(rule.order)
+          : 10000,
+      enabled: rule.enabled === true,
+    });
+  }
+  return out;
 }
 
 /**
  * 归整 `$7 默认上下文`的全局兜底。
  *
- * 条数缺省给 3 —— 与 ACU 预设里 `contextTurnCount ?? 3` 的默认一致，
- * 免得「没设过」和「设成 0（不抓前文）」看起来一样。
+ * 条数缺省给 3 —— 这是全局兜底的默认值；预设里若写了 `contextTurnCount` 就以预设为准
+ * （预设缺这个字段时，上游运行时读的是 `?? 1`，这里的 3 只在没选预设时生效）。
+ * 给 3 是为了让「没设过」和「设成 0（不抓前文）」看起来不一样。
  */
 function readContextDefaults(raw: unknown): RerushSettings['plot']['contextDefaults'] {
   const source = (raw ?? {}) as Partial<RerushSettings['plot']['contextDefaults']>;
@@ -491,14 +521,14 @@ function normalizeTavernSource(raw: unknown): string {
  * 读的时候把它踢掉等于让用户的预设静默消失。体积限制只拦「新导入」那一步。
  */
 function readStoredPreset(raw: unknown): RerushSettings['plot']['presets'][number] | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (!isPlainObject(raw)) return null;
   const item = raw as Partial<RerushSettings['plot']['presets'][number]>;
   const name = typeof item.name === 'string' ? item.name.trim() : '';
   if (!name) return null;
   // 2026-11-01 曾把预设存成双层（`{name,data:{name,data:本体,…},…}`），
   // 读的时候统一剥回本体，老用户不用手动删掉重导。
   const data = unwrapPresetPayload(item.data);
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  if (!isPlainObject(data)) return null;
   return {
     name,
     data: data as Record<string, unknown>,
@@ -509,7 +539,7 @@ function readStoredPreset(raw: unknown): RerushSettings['plot']['presets'][numbe
 
 /** 一条 API 配置：脏字段一律回落默认，整条无效才丢弃（名字为空的丢掉）。 */
 function readPlotApi(raw: unknown): PlotApiEntry | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (!isPlainObject(raw)) return null;
   const item = raw as Partial<PlotApiEntry>;
   const name = typeof item.name === 'string' ? item.name.trim() : '';
   if (!name) return null;
@@ -523,7 +553,7 @@ function readPlotApi(raw: unknown): PlotApiEntry | null {
     // 老数据里可能还存着 ACU 的协议名（openai_compat 等）：读的时候就换成酒馆认的值，
     // 否则下次调用会被后端以 `Unsupported chat_completion_source` 直接打回。
     source: normalizeTavernSource(item.source),
-    maxTokens: readNumberOrLiteral(item.maxTokens, 60000),
+    maxTokens: readNumberOrLiteral(item.maxTokens, DEFAULT_MAX_TOKENS),
     temperature: readNumberOrLiteral(item.temperature, 1),
     importedFrom: typeof item.importedFrom === 'string' ? item.importedFrom : '',
     // 老版本存下来的条目没有这两个字段：补空串，别让整份设置校验失败

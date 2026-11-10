@@ -117,16 +117,6 @@ function ruleTitle(rule: PresetRuleDraft): string {
     </div>
   </div>
 
-  <div class="acu-section">
-    <h4>{{ UI.plot.placeholderTitle }}</h4>
-    <div class="acu-placeholder-legend">
-      <div v-for="item in UI.plot.placeholderLegend" :key="item.code" class="acu-placeholder-item">
-        <code>{{ item.code }}</code> — {{ item.desc }}
-      </div>
-    </div>
-    <p class="acu-notes">{{ UI.plot.placeholderHint }}</p>
-  </div>
-
 </template>
 
 <style scoped>

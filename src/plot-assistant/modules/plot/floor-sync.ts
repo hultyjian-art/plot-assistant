@@ -9,9 +9,14 @@
  * 改 assistant 楼层是改正文，与剧情推进的成果无关，直接放过。
  *
  * 写回时带 `refresh: 'affected'`，酒馆发的是 `MESSAGE_UPDATED` 而不是 `MESSAGE_EDITED`，
- * 不会自己触发自己；再加一个 `busy` 闸，双保险。
+ * 不会自己触发自己。
+ *
+ * 推进运行期间（`ctx.state.locked` 为真）不写盘：引擎整轮只 load 一次账本快照，
+ * 中途多次整份 saveStash，若这时插一次「读旧快照 → 整份写回」，后写会把引擎成果盖掉。
+ * 编辑事件先排队，推进结束后按序补同步；同步进行中（busy）到达的事件也排队，不丢。
  */
 
+import { isPlainObject } from './guards';
 import type { RerushContext } from '../types';
 import { resolveChatKey } from './chat-key';
 import { resolveChatStateStore } from './data/chat-vars';
@@ -36,7 +41,7 @@ export interface FloorSyncHandle {
 /** 把 `qrf_plot_tasks` 那份 map 还原成写回层认识的形状，免得同步时把它清空。 */
 function taskResultsFrom(extra: Record<string, unknown>): PlotTaskResult[] {
   const raw = extra[QRF_PLOT_TASKS];
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  if (!isPlainObject(raw)) return [];
   return Object.entries(raw as Record<string, unknown>)
     .filter(([, value]) => typeof value === 'string' && value.trim() !== '')
     .map(([taskId, value], index) => ({
@@ -107,28 +112,109 @@ export async function syncFloorEdit(ctx: RerushContext, messageId: number): Prom
 }
 
 /**
+ * 楼层编辑事件的等待队列。导出是为了能在没有酒馆事件的环境里直接测（`tools/plot-parity`）。
+ *
+ * 推进期间不写盘，事件按到达顺序攒着；推进结束后逐条补同步。每条同步内部都会
+ * 重新 loadStash，因此读到的一定是推进写完之后的最新账本，不会拿旧快照盖掉成果。
+ * 同步进行中（busy）到达的事件同样排队，不再像以前那样直接 return 丢掉。
+ */
+export interface PendingEditQueue {
+  /** 收到一次编辑事件 */
+  push(messageId: number): void;
+  /** 卸载时清掉等待中的事件与定时器 */
+  stop(): void;
+}
+
+export interface PendingEditQueueOptions {
+  /** 推进正在跑（send-gate 的 run() 全程置位的 ctx.state.locked）：为真时只排队 */
+  isRunning: () => boolean;
+  /** 真正同步一次 */
+  sync: (messageId: number) => Promise<string>;
+  /** 同步结果的处理（日志） */
+  onResult?: (messageId: number, result: string) => void;
+  /** 等推进结束的检查间隔（毫秒），测试里可给小值 */
+  pollMs?: number;
+}
+
+export function createPendingEditQueue(options: PendingEditQueueOptions): PendingEditQueue {
+  const pending: number[] = [];
+  const pollMs = options.pollMs ?? 200;
+  let busy = false;
+  let stopped = false;
+  let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 一次只跑一条：按序补同步，跑完再接上下一条（含 busy 期间新到的）。 */
+  const drain = async (): Promise<void> => {
+    if (stopped || busy || options.isRunning() || pending.length === 0) return;
+    const messageId = pending.shift()!;
+    busy = true;
+    try {
+      const result = await options.sync(messageId);
+      options.onResult?.(messageId, result);
+    } catch (error) {
+      console.warn('[剧情推进助手] 楼层改动同步失败', error);
+    } finally {
+      busy = false;
+    }
+    wake();
+  };
+
+  function wake(): void {
+    if (stopped || pending.length === 0) return;
+    if (options.isRunning()) {
+      // 还在推进：排队等它跑完，期间一次盘都不写。
+      if (wakeTimer === null) {
+        wakeTimer = setTimeout(() => {
+          wakeTimer = null;
+          wake();
+        }, pollMs);
+      }
+      return;
+    }
+    if (busy) return;
+    void drain();
+  }
+
+  return {
+    push(messageId) {
+      if (stopped) return;
+      pending.push(messageId);
+      wake();
+    },
+    stop() {
+      stopped = true;
+      pending.length = 0;
+      if (wakeTimer !== null) {
+        clearTimeout(wakeTimer);
+        wakeTimer = null;
+      }
+    },
+  };
+}
+
+/**
  * 挂上「楼层编辑」监听。返回的 `stop()` 由 `ctx.state.detachListeners` 一起收尾。
  */
 export function mountFloorSync(ctx: RerushContext): FloorSyncHandle {
-  let busy = false;
+  const queue = createPendingEditQueue({
+    // run() 从置 true 到 finally 的 finishUi() 全程锁着 state.locked，
+    // 引擎那几次整份 saveStash 都落在这个窗口里。
+    isRunning: () => ctx.state.locked === true,
+    sync: messageId => syncFloorEdit(ctx, messageId),
+    onResult: (messageId, result) => {
+      if (result !== 'skip:not-user' && result !== 'skip:no-plot' && result !== 'skip:same') {
+        console.info(`[剧情推进助手] 楼层 ${messageId} 改动已同步：${result}`);
+      }
+    },
+  });
   const handler = (messageId: number): void => {
-    if (busy) return;
     if (typeof messageId !== 'number' || !Number.isFinite(messageId)) return;
-    busy = true;
-    void syncFloorEdit(ctx, messageId)
-      .then(result => {
-        if (result !== 'skip:not-user' && result !== 'skip:no-plot' && result !== 'skip:same') {
-          console.info(`[剧情推进助手] 楼层 ${messageId} 改动已同步：${result}`);
-        }
-      })
-      .catch(error => console.warn('[剧情推进助手] 楼层改动同步失败', error))
-      .finally(() => {
-        busy = false;
-      });
+    queue.push(messageId);
   };
   const off = eventOn(tavern_events.MESSAGE_EDITED, handler);
   return {
     stop: () => {
+      queue.stop();
       try {
         off.stop();
       } catch (error) {

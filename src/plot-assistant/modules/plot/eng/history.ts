@@ -4,12 +4,11 @@
  * 从聊天记录里倒着数 N 条 AI 输出（`plotSettings.contextTurnCount`，默认 1），
  * 拼成一段给 AI 看的参考文本。纯函数：只读传进来的数组，不碰全局状态。
  *
- * 四个容易数错的地方（都写了用例）：
+ * 三个容易数错的地方（都写了用例）：
  *  1. 尾部若有「真实 AI 占位的假楼层」，要先跳过去 —— 那不是历史。
- *  2. 当前这条用户输入不参与（ACU 有一处位移判断，但**位移与否对 `$7` 结果没有影响**，
- *     因为扫描循环本来就跳过 `is_user`；这个结论有用例钉着，别"优化"掉）。
- *  3. 扫描时同时跳过 `is_user`、`_qrf_from_planning`、`_qrf_plot_pending_placeholder`。
- *  4. `contextTurnCount` 为 0 直接给空数组，不是"默认 1"。
+ *  2. 扫描时同时跳过 `is_user`、`_qrf_from_planning`、`_qrf_plot_pending_placeholder`；
+ *     所以「当前这条用户输入」不需要额外退一格，扫描循环本来就会跳过它。
+ *  3. `contextTurnCount` 为 0 直接给空数组，不是"默认 1"。
  */
 import { sanitizeHtml } from './prompt-build';
 
@@ -44,14 +43,12 @@ function identityFilter(content: string | undefined): string | undefined {
  * 从 `chat` 里倒着取最近 `contextTurnCount` 条 AI 输出（正序返回）。
  *
  * @param chat 聊天楼层数组（下标即楼层号）
- * @param userMessage 本轮用户输入。原件拿它做一次位移判断，但对 `$7` 无影响，保留是为了将来对齐
  * @param contextTurnCount 取几条，`<= 0` 返回空数组
  * @param filter 每条正文的预处理器（对应原件的标签抽取/剔除），默认透传
  * @param hasFilters 是否启用过滤器（原件按四个配置字段是否非空来决定要不要过滤）
  */
 export function pickHistoryMessages(
   chat: HistoryMessageLike[] | null | undefined,
-  userMessage: string,
   contextTurnCount: number,
   filter: (content: string | undefined) => string | undefined = identityFilter,
   hasFilters = false,
@@ -63,14 +60,6 @@ export function pickHistoryMessages(
   while (contextEndIndex >= 0 && list[contextEndIndex] && list[contextEndIndex]._qrf_plot_pending_placeholder) {
     contextEndIndex -= 1;
   }
-  // 当前位置若是本轮用户输入，原件会再退一格。
-  // 注意：退与不退对 `$7` 结果没有区别（下面循环本来就跳过 is_user），此处如实保留。
-  if (contextEndIndex >= 0 && list[contextEndIndex] && list[contextEndIndex].is_user) {
-    if (String(list[contextEndIndex].mes || '') === String(userMessage || '')) {
-      contextEndIndex -= 1;
-    }
-  }
-
   if (!(contextTurnCount > 0)) return [];
 
   const extracted: HistorySegment[] = [];

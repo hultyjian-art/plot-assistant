@@ -74,9 +74,14 @@ export async function migrateStashToQrf(ctx: { state: { chatKey: string | null }
 
   let moved = 0;
   let failed = 0;
+  const movedEntries = new Set<StashEntry>();
   for (const entry of stash.entries) {
     const landing = activeLanding(entry);
-    if (!landing) continue;
+    if (!landing) {
+      failed += 1;
+      console.warn('[剧情推进助手] 迁移到 qrf：这一层没有正在使用的版本，跳过', entry.floorId);
+      continue;
+    }
     const saveContent = saveContentOfLanding(landing);
     if (saveContent === '') {
       failed += 1;
@@ -92,6 +97,7 @@ export async function migrateStashToQrf(ctx: { state: { chatKey: string | null }
         taskResults: taskResultsOf(landing),
       });
       moved += 1;
+      movedEntries.add(entry);
     } catch (error) {
       failed += 1;
       console.warn('[剧情推进助手] 迁移到 qrf 失败（这一层原样留着）', entry.floorId, error);
@@ -99,13 +105,17 @@ export async function migrateStashToQrf(ctx: { state: { chatKey: string | null }
   }
 
   // 一层都没搬成就不动账本：先清后写等于删数据。
-  if (moved > 0) store.saveStash(createStash(chatKey));
+  // 全部搬成才整本清空；部分成功时只把已搬成的 entries 剔除，没搬成的原样留在账本里。
+  if (moved > 0) {
+    if (failed === 0) store.saveStash(createStash(chatKey));
+    else store.saveStash({ ...stash, entries: stash.entries.filter(entry => !movedEntries.has(entry)) });
+  }
   return {
     moved,
     failed,
     note:
       failed > 0
-        ? `已把 ${moved} 层写进楼层字段，${failed} 层没搬成（原来的账还留着）。`
+        ? `${moved} 层已写进楼层字段，${failed} 层没搬成，没搬成的还留在账本里。`
         : `已把 ${moved} 层写进楼层字段，账本已清空。`,
   };
 }

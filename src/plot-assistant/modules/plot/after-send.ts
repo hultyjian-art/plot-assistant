@@ -13,6 +13,7 @@
  */
 
 import { writePlotExtraToFloor } from './data/chat-write';
+import { markAnchorsOnFloor } from './floor-anchor';
 import type { PlotCommit } from './run-in-flow';
 
 export interface PlotSendCheckResult {
@@ -33,6 +34,8 @@ interface FloorLike {
   message_id: number;
   role: string;
   message: string;
+  /** 读来合锚点用：setChatMessages 的 extra 是整份替换，别的脚本塞的键不能丢。 */
+  extra?: Record<string, unknown>;
 }
 
 /** 数 `<plot` 出现几次。不用 DOM、不用 JSON，纯文本数一遍就够。 */
@@ -92,6 +95,21 @@ export async function completePlotSend(
   }
 
   const plotCount = countPlotBlocks(floor.message);
+
+  // 锚点是「这条楼层跑过哪些任务」的触发账本，不是 qrf 的成果写回 ——
+  // 升级模式也要写，否则「每 N 条用户楼层」的任务永远判成第一次跑。
+  // 写失败只记一笔：消息已经发出去了，不能让补写失败显示成整轮失败。
+  if ((commit.anchorNames?.length ?? 0) > 0) {
+    try {
+      await markAnchorsOnFloor(
+        { message_id: floor.message_id, message: floor.message, extra: floor.extra },
+        commit.anchorNames,
+        row => setChatMessages([row], { refresh: 'affected' }),
+      );
+    } catch (error) {
+      console.warn('[剧情推进助手] 补写楼层锚点失败', error);
+    }
+  }
 
   // 升级模式：成果在账本里，楼层不写 qrf。正文里出现多个 <plot> 仍然要提醒 ——
   // 那是"上游 ACU 的剧情推进也开着"，与本模式无关，但会让下一轮读到两份剧情。

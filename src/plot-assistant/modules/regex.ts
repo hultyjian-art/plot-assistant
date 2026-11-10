@@ -56,7 +56,11 @@ export function captureByRegex(text: string, preset: RegexPreset): string | null
     const regex = compileRegex(preset.regex);
     const match = regex.exec(text);
     if (!match) return null;
-    return match.length > 1 ? match[1] : match[0];
+    // 捕获组未参与匹配时 match[1] 是 undefined（RegExpExecArray 的声明却写成 string）。
+    // 按「无匹配、继续下一条预设」口径返回 null：否则调用方会对 undefined 调 .trim()
+    // 抛 TypeError，而那处异常跑在解锁之外，会把按钮手势永久锁死。
+    const captured: string | undefined = match.length > 1 ? match[1] : match[0];
+    return captured ?? null;
   } catch {
     return null;
   }

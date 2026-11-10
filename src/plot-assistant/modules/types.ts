@@ -169,15 +169,31 @@ export interface PlotContextDefaults {
   excludeRules: PlotContextRule[];
 }
 
+/**
+ * 一条「世界书写入规则」（2026-11-07 批 36-38 用户定）：
+ * 一轮推进落盘后，把规则选中的标签块写成世界书条目。
+ *
+ * 完整条目名 = 固定前缀（`plot_assistant-`，写死不可改）+ 条目名；
+ * 条目名默认就是标签名，玩家可改 —— 改了之后「切聊天/切角色卡自动切换」对该规则
+ * 失效（旧名字认不出来了），改回来又生效，脚本不做任何改名兼容（批 38 用户定）。
+ */
+export interface PlotWorldbookWriteRule {
+  /** 选哪个标签名（从预设的任务抽取标签 + 最终注入 `{{标签}}` 里挑，不另造一套） */
+  tagName: string;
+  /** 条目名（不带前缀）。空串 = 用标签名 */
+  entryName: string;
+  /** 插入深度（系统深度）。默认照工作流助手 = 2 */
+  depth: number;
+  /** 插入顺序，数值越小越靠前。默认照工作流助手 = 10000 */
+  order: number;
+  /** 是否启用。停用的规则不再写入；下次切换重算时它的旧条目会被清掉 */
+  enabled: boolean;
+}
+
 export interface PlotSettings {
   /** 总开关。默认 false —— 关着的时候不跑剧情推进，脚本行为与加功能前一致。 */
   enabled: boolean;
   presetName: string;
-  /**
-   * 上一轮跑到第几个「轮次」了。触发轮次（每 N 轮跑一次）靠它判断该不该跑。
-   * 换聊天不会重置 —— 轮次是跟着这次对话往下数的。
-   */
-  roundIndex: number;
   /** 自己的一份 API 清单。空 = 还没配（面板会提示去 ACU 导入或手填） */
   apis: PlotApiEntry[];
   /** 跑任务时用哪一条 API（按名字对齐；名字找不到就退回酒馆当前连接） */
@@ -222,13 +238,6 @@ export interface PlotSettings {
    */
   presets: StoredPlotPreset[];
   /**
-   * 「每个任务上次在第几轮跑过」的账本，键是 `预设名::任务id`（见 `plot/round-book.ts`）。
-   *
-   * 为什么不写进预设本体：预设是用户会导来导去的配置文件，账混进去会让导出的 JSON
-   * 带着「我这边跑到第几轮了」，而且每跑一轮都要改一次预设。
-   */
-  taskRuns: Record<string, number>;
-  /**
    * 推进结果的存放方式（2026-11-03 用户定）：
    *
    * - `'upgrade'`：成果进聊天变量里的暂存账本（本脚本自己的账，每层最多两版）。
@@ -238,6 +247,20 @@ export interface PlotSettings {
    * 否则两份数据各写各的，用户改了一边另一边不跟着动，就成了"账本说 A、楼层说 B"。
    */
   stashMode: 'upgrade' | 'qrf';
+  /**
+   * 世界书写入规则（2026-11-07 新增）。空数组 = 没配，行为与加功能前完全一致。
+   * 与「用户楼层注入」互不干涉：最终注入指令里写了 `{{标签}}` 照旧注入，不加去重/互斥
+   * 判断（批 36 用户定：写预设的人自己会避重）。
+   */
+  worldbookWriteRules: PlotWorldbookWriteRule[];
+  /**
+   * 条目写进哪本书：character = 当前角色卡绑定的世界书（主书 + 附加书，与 `$1` 的
+   * 读端口径一致）；manual = 下面勾的那几本。它与 `worldbookSource` 是**读**与**写**
+   * 两件事，字段、控件都分开。
+   */
+  worldbookWriteSource: 'character' | 'manual';
+  /** 写入手动模式勾选的书名。 */
+  worldbookWriteBooks: string[];
 }
 
 /** 本次运行期间的可变状态。 */
@@ -302,6 +325,8 @@ export interface TavernContextLike {
   chatId?: string;
   chat?: ChatMessageLike[];
   generate?(mode: string): void;
+  /** 酒馆自带的宏替换（新版 `getContext()` 会暴露它） */
+  substituteParams?: (content: string, options?: unknown) => string;
   /** Luker 的批量删层：改 chat 数组、摘掉 DOM 块、一次增量保存，不重载整个对话 */
   deleteMessages?(messageIndices: number[]): Promise<unknown>;
   /** Luker 暴露的发送入口，等价于点发送按钮（读输入框并发出请求） */
@@ -333,7 +358,27 @@ export interface TavernProfile {
 /** 带本脚本自定义挂载点的 Window 描述。 */
 export type RerushWindow = Window & {
   SillyTavern?: TavernLike;
-  TavernHelper?: { triggerSlash?: unknown };
+  TavernHelper?: {
+    triggerSlash?: unknown;
+    /** 酒馆助手的原生宏替换（`<user>` / `{{user}}` / `<char>` / `{{char}}` 等） */
+    substitudeMacros?: (text: string) => string;
+    /** 应用酒馆正则（正则 + ST 宏 + MacroLike） */
+    formatAsTavernRegexedString?: (
+      text: string,
+      source: 'user_input' | 'ai_output' | 'slash_command' | 'world_info' | 'reasoning',
+      destination: 'display' | 'prompt',
+      options?: { depth?: number; character_name?: string },
+    ) => string;
+    /** 当前最新楼层 id；EJS 的 `prepareContext` 与宏深度会用到 */
+    getLastMessageId?: () => number;
+  };
+  /** 提示词模板语法插件；不存在时保持原文，不影响宏替换 */
+  EjsTemplate?: {
+    prepareContext?: (additional_context?: Record<string, any>, last_message_id?: number) => Promise<Record<string, any>>;
+    /** 酒馆助手类型里是小写 `evaltemplate`，部分版本也暴露 `evalTemplate` */
+    evaltemplate?: (code: string, context?: Record<string, any>, options?: Record<string, any>) => Promise<string>;
+    evalTemplate?: (code: string, context?: Record<string, any>, options?: Record<string, any>) => Promise<string>;
+  };
   toastr?: typeof toastr;
   $?: JQueryStatic;
 };

@@ -16,6 +16,7 @@
  * **这一页除了「打开总开关时替你关掉它那边的剧情推进」，不写数据库脚本任何东西**：
  * 预设从它那里按名字取，API 则是"导入一份到本地"后就与它无关了（用户要求的独立存储）。
  */
+import { DEFAULT_MAX_TOKENS } from '../constants';
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { klona } from 'klona';
 import { UI } from '../copy';
@@ -25,6 +26,8 @@ import StashPanel from './StashPanel.vue';
 import RunLogPanel from './RunLogPanel.vue';
 import TagRuleEditor from './TagRuleEditor.vue';
 import TaskEditor from './TaskEditor.vue';
+import CopyPasteDialog from './CopyPasteDialog.vue';
+import { clipKind, clipSource, copyBlockToClip, copyTaskToClip, readClip } from './clipboard';
 import {
   describePresetProblem,
   listPlotPresetNames,
@@ -39,7 +42,7 @@ import { readAcuApiPresets } from '../plot/data/acu-apis-io';
 import { readAcuPlotFlag } from '../plot/data/acu-plot-flag';
 import { migrateQrfToStash, migrateStashToQrf } from '../plot/stash-migrate';
 import { saveSettings } from '../settings';
-import { pageToastr } from '../tavern';
+import { pageQuery, pageToastr } from '../tavern';
 import {
   MAX_STORED_PRESET_CHARS,
   describePresetSource,
@@ -50,24 +53,32 @@ import {
   mergeStoredPresets,
 } from '../plot/data/preset-store';
 import {
+  WORLD_BOOK_WRITE_KEY,
+  adoptBlockDraft,
   applyPresetDraft,
   applyTaskDrafts,
+  cloneTaskDraft,
   findNameConflict,
   newPresetData,
+  packWorldbookWrite,
   presetFileName,
   readPresetDraft,
   readTaskDrafts,
+  readWorldbookWriteFromPreset,
   toPresetExportJson,
   validatePresetDraft,
   type PresetDraft,
+  type PresetWorldbookWrite,
+  type TaskBlockDraft,
   type TaskDraft,
 } from '../plot/preset-edit';
 import { maskApiKey } from '../plot/api-key';
 import { fetchModelList } from '../plot/api-models-io';
 import type { PlotApiEntry, PlotSettings, RerushContext, StoredPlotPreset } from '../types';
 import { previewPlotRound, type PlotPreview } from '../plot/preview-flow';
-import { getCommentInfo, isDatabaseGeneratedEntry, isFrameworkEntry } from '../plot/data/worldbook-hits';
-import { pageQuery } from '../tavern';
+import { collectKnownTagNames } from '../plot/eng/tag-diff';
+import { cleanupAllWorldbooks, cleanupCurrentCardWorldbooks } from '../plot/worldbook-write';
+import { getCommentInfo, isDatabaseGeneratedEntry, isFrameworkEntry, isManagedWorldbookEntry } from '../plot/data/worldbook-hits';
 
 const props = defineProps<{
   plot: PlotSettings;
@@ -78,17 +89,16 @@ const props = defineProps<{
 /**
  * 草稿：从 ctx.settings 整份拷一份，改完由外层统一 emit('save')。
  *
- * **不要改回手写字段清单。** 2026-11-01 这里是一张手写的键表，`taskRuns` 加进来时
- * 没人记得补 —— 面板改完一保存，那一项就被静默抹掉了，运行时账本跟着清零，
- * 「每 N 轮」的任务全部重新从第一轮数起。整份 `klona` 之后，以后再加字段不用动这里。
+ * **不要改回手写字段清单。** 早先这里是一张手写的键表，每加一个字段都得记得补；
+ * 漏一个，面板改完一保存那一项就被静默抹掉。整份 `klona` 之后，以后再加字段不用动这里。
  */
 const draft = reactive<PlotSettings>(klona(props.plot));
 
 /**
  * 上一次落盘时的样子，只用来回答一个问题：「这一页有没有改过还没存？」
  *
- * 用整份 JSON 比而不是逐字段比：字段会继续加（今年就加过 `taskRuns`），
- * 手写清单必然漏，漏了就是「明明改了却说不脏」——那还不如没有这个提示。
+ * 用整份 JSON 比而不是逐字段比：字段还会继续加，手写清单必然漏，
+ * 漏了就是「明明改了却说不脏」——那还不如没有这个提示。
  */
 const snapshot = ref(JSON.stringify(props.plot));
 
@@ -117,7 +127,7 @@ function isDirtyNow(): boolean {
   return isDirty.value;
 }
 
-defineExpose({ draft, applyEditor, isDirtyNow, discardDraft, markSaved });
+defineExpose({ draft, applyEditor, isDirtyNow, discardDraft, markSaved, validationNote: () => presetNote.value });
 
 /**
  * 立刻把这一页的草稿写进设置。
@@ -320,7 +330,9 @@ function removeCurrentPreset(): void {
 }
 
 /** 导出用的文本与文件名（工具栏按钮要）。 */
-const exportText = computed(() => (exportData.value === null ? '' : toPresetExportJson(exportData.value)));
+const exportText = computed(() =>
+  exportData.value === null ? '' : toPresetExportJson(exportData.value, packWorldbookWrite(draft)),
+);
 const exportName = computed(() => presetFileName(draft.presetName));
 
 /** 任务表里某一条的展示用字段（都是预设自带的可选字段，缺了就是空）。 */
@@ -499,7 +511,7 @@ async function loadWorldbookEntries(): Promise<void> {
         return {
           uid: String(entry.uid ?? ''),
           label: name || `条目 ${String(entry.uid ?? '')}`,
-          blocked: isFrameworkEntry({ rawComment, normalizedComment }),
+          blocked: isFrameworkEntry({ rawComment, normalizedComment }) || isManagedWorldbookEntry({ rawComment }),
           db: isDatabaseGeneratedEntry({ normalizedComment }),
         };
       });
@@ -561,6 +573,91 @@ function entryOnCount(book: string): number {
   const list = entrySelection(book);
   const rows = wbEntryRows.value[book] ?? [];
   return list === null ? rows.length : rows.filter(row => list.includes(row.uid)).length;
+}
+
+// ───────────────────────── 世界书写入（2026-11-07 批 36-38） ─────────────────────────
+//
+// 与上面「世界书（$1）」是读与写两件事：那块管任务提示词读哪几本书，这一块管
+// 把一轮推进的标签块写进哪本书。字段分开（worldbookWrite*）、控件分开，别混着改。
+
+/** 当前预设里出现过的标签名：任务抽取标签 + 最终注入里的 `{{标签}}`，规则下拉从这选。 */
+const wbWriteTagOptions = computed<string[]>(() => {
+  const ed = editorDraft.value;
+  if (ed === null) return [];
+  return collectKnownTagNames(editorTasks.value, ed.prompts.finalDirective);
+});
+
+function addWbWriteRule(): void {
+  const used = new Set(draft.worldbookWriteRules.map(rule => rule.tagName));
+  // 优先补还没被用过的标签：连点几下「加一条」不该全是同一个标签
+  const tag = wbWriteTagOptions.value.find(name => !used.has(name)) ?? wbWriteTagOptions.value[0] ?? '';
+  if (tag === '') return;
+  draft.worldbookWriteRules = [
+    ...draft.worldbookWriteRules,
+    // 位置默认照工作流助手（批 36 用户定）：系统深度 / 深度 2 / 顺序 10000
+    { tagName: tag, entryName: '', depth: 2, order: 10000, enabled: true },
+  ];
+}
+
+function removeWbWriteRule(index: number): void {
+  draft.worldbookWriteRules = draft.worldbookWriteRules.filter((_, at) => at !== index);
+}
+
+/** 写入手动模式的搜索词。与读侧那格分开 —— 两个书单同时开着时互不干扰。 */
+const wbWriteQuery = ref('');
+const filteredWriteBooks = computed(() => {
+  const q = wbWriteQuery.value.trim().toLowerCase();
+  if (q === '') return wbBooks.value;
+  return wbBooks.value.filter((name) => name.toLowerCase().includes(q));
+});
+
+function toggleWbWriteBook(name: string): void {
+  const list = draft.worldbookWriteBooks.slice();
+  const at = list.indexOf(name);
+  if (at >= 0) list.splice(at, 1);
+  else list.push(name);
+  draft.worldbookWriteBooks = list;
+}
+
+watch(
+  () => draft.worldbookWriteSource,
+  (source) => {
+    if (source === 'manual' && wbBooks.value.length === 0) void loadWorldbooks();
+  },
+);
+
+/** 清理按钮的忙态：两个按钮共用，防止连点并发删。 */
+const wbWriteCleaning = ref<'current' | 'all' | null>(null);
+
+/**
+ * 两个清理按钮（批 36 用户定）。都要二次确认 —— 会动世界书数据。
+ *
+ * 范围与认领口径刻意不同（交接文档 §4.4）：
+ * - 只清当前角色卡的：角色卡绑定的书里、按**当前规则推导出的完整条目名**删；
+ * - 清理本机所有世界书的：按**前缀**扫全部书，兜得住改名 / 删规则留下的孤儿。
+ * 用的是**已保存**的设置（`ctx.settings.plot`），面板上没保存的草稿不算数 ——
+ * 与引擎实际写入用的规则保持同一个口径。
+ */
+async function runWbCleanup(kind: 'current' | 'all'): Promise<void> {
+  if (wbWriteCleaning.value !== null) return;
+  // 用父窗口的 confirm —— iframe 自己那个在部分浏览器里会被拦（见 dropApi 的注释）。
+  const ask = (window.parent as { confirm?: (text: string) => boolean }).confirm;
+  const message = kind === 'current' ? UI.plot.wbWriteCleanCurrentConfirm : UI.plot.wbWriteCleanAllConfirm;
+  if (typeof ask === 'function' && !ask(message)) return;
+
+  wbWriteCleaning.value = kind;
+  try {
+    const rules = props.ctx.settings.plot.worldbookWriteRules;
+    const result = kind === 'current' ? await cleanupCurrentCardWorldbooks(rules) : await cleanupAllWorldbooks();
+    if (result.deleted === 0) pageToastr()?.success(UI.plot.wbWriteCleanNone, UI.plot.wbWriteSection);
+    else pageToastr()?.success(UI.plot.wbWriteCleanDone(result.deleted, result.books.length), UI.plot.wbWriteSection);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pageToastr()?.error(UI.plot.wbWriteCleanFail(message), UI.plot.wbWriteSection);
+    console.warn('[剧情推进助手] 清理世界书写入条目失败', error);
+  } finally {
+    wbWriteCleaning.value = null;
+  }
 }
 
 watch(
@@ -650,7 +747,6 @@ function applyEditor(): boolean {
   const index = draft.presets.indexOf(stored);
   draft.presets[index] = { ...stored, name: nextName, data };
   if (draft.presetName === editorOrigin.value) draft.presetName = nextName;
-  renameTaskRuns(editorOrigin.value, nextName);
 
   const warns = issues.filter((issue) => issue.level === 'warn');
   const applied = UI.plot.presetEditApplied(describeStoredPresetSize(size));
@@ -663,20 +759,86 @@ function applyEditor(): boolean {
 }
 
 /**
- * 预设改名时把账本一起搬过去。
+ * 复制粘贴的唯一去处：一个子页面（CopyPasteDialog）。
  *
- * 账本的键是 `预设名::任务id`。只改预设名、不搬账，那个预设的「每 N 轮」
- * 会全部重新从第一轮数起 —— 用户只是改了个名字，却像是重置了所有周期。
+ * 复制按钮只把内容交给这里，弹窗里点一下目标就完成粘贴，不再需要
+ * 「切预设 → 滚到底部 → 挑任务 → 点粘贴」四步。
+ *
+ * 安全机制（用户 2026-11-09 要求）：
+ *   ① 粘之前**先自动保存一次**当前设置 —— 中途出错，磁盘上仍是完整的旧状态；
+ *   ② 粘进去的内容只改内存草稿，不落盘；
+ *   ③ 因此用户不点面板右上角「保存」就退出，这份粘贴不会保留。
  */
-function renameTaskRuns(from: string, to: string): void {
-  if (from === to) return;
-  const prefix = `${from}::`;
-  const next: Record<string, number> = {};
-  for (const [key, value] of Object.entries(draft.taskRuns)) {
-    next[key.startsWith(prefix) ? `${to}::${key.slice(prefix.length)}` : key] = value;
-  }
-  draft.taskRuns = next;
+const copyPasteOpen = ref(false);
+
+/** 弹窗里的目标：本地库里每一份已经导入的预设 + 它的所有任务。 */
+const pasteTargets = computed(() =>
+  draft.presets.map(preset => ({
+    name: preset.name,
+    tasks: readTaskDrafts(preset.data).map((task, index) => ({
+      index,
+      name: task.name.trim() || `${UI.plot.editorTask} ${index + 1}`,
+    })),
+  })),
+);
+
+function openCopyPaste(kind: 'block' | 'task', payload: TaskBlockDraft | TaskDraft): void {
+  if (kind === 'block') copyBlockToClip(payload as TaskBlockDraft, draft.presetName);
+  else copyTaskToClip(payload as TaskDraft, draft.presetName);
+  copyPasteOpen.value = true;
 }
+
+function pasteTo(presetName: string, taskIndex: number): void {
+  const current = readClip();
+  const index = draft.presets.findIndex(preset => preset.name === presetName);
+  if (!current || index < 0) {
+    copyPasteOpen.value = false;
+    return;
+  }
+  const stored = draft.presets[index];
+  const tasks = readTaskDrafts(stored.data);
+
+  // 先把要粘的东西算出来：目标不合法就直接收工，别动任何状态
+  let newBlock: TaskBlockDraft | null = null;
+  let newTask: TaskDraft | null = null;
+  let taskLabel = '';
+  if (current.kind === 'block' && current.block) {
+    const target = tasks[taskIndex];
+    if (!target) {
+      copyPasteOpen.value = false;
+      return;
+    }
+    taskLabel = target.name.trim() || `${UI.plot.editorTask} ${taskIndex + 1}`;
+    // 粘进来的块 id 要在目标任务的现有块里唯一（第 48 次定下的规矩）
+    newBlock = adoptBlockDraft(current.block, target.blocks);
+    target.blocks.push(newBlock);
+  } else if (current.kind === 'task' && current.task) {
+    newTask = cloneTaskDraft(current.task, tasks);
+    tasks.push(newTask);
+  } else {
+    copyPasteOpen.value = false;
+    return;
+  }
+
+  // ① 粘贴之前先存一次盘：磁盘上留一份完整的「粘贴前」状态
+  commitPlot();
+  markSaved();
+
+  // ② 只改内存草稿 —— 不点「保存」就退出，这份粘贴不会留下
+  draft.presets[index] = { ...stored, data: applyTaskDrafts(stored.data, tasks) };
+
+  // ③ 目标正是当前正在编辑的预设：编辑器草稿同步一份，免得点「应用修改」把它盖掉
+  if (presetName === editorOrigin.value) {
+    if (newBlock && editorTasks.value[taskIndex]) editorTasks.value[taskIndex].blocks.push(klona(newBlock));
+    if (newTask) editorTasks.value.push(klona(newTask));
+  }
+
+  copyPasteOpen.value = false;
+  presetNote.value = newBlock
+    ? UI.plot.copyPasteDone(presetName, taskLabel)
+    : UI.plot.copyPasteDoneTask(presetName);
+}
+
 
 /** 导出用：当前选中那份预设的数据（不在本地就是 null）。 */
 const exportData = computed<Record<string, unknown> | null>(() => editingStored.value?.data ?? null);
@@ -689,7 +851,30 @@ const exportData = computed<Record<string, unknown> | null>(() => editingStored.
  * 「看看那边有没有新的」，本地改过的不能被静默冲掉。
  */
 function onPresetImport(payload: { presets: Record<string, unknown>[]; skipped: number }): void {
-  const merged = mergeStoredPresets(draft.presets, payload.presets, { keepLocal: false, source: 'paste' });
+  // 「世界书写入」那三项是脚本全局设置、不在预设本体上：导出时把它们塞进了文件，
+  // 这里读回来恢复，再从预设本体里摘掉 —— 本地库只存预设自己的数据，
+  // 免得以后改了设置、库里那份过期副本又被写回文件。
+  // 文件里没带这个键就不动设备上现有的设置（老文件、别处导出的预设都走这条）。
+  let restored: PresetWorldbookWrite | null = null;
+  for (const preset of payload.presets) {
+    const carried = readWorldbookWriteFromPreset(preset);
+    if (carried !== null) {
+      restored = carried;
+      break;
+    }
+  }
+  if (restored !== null) {
+    draft.worldbookWriteRules = restored.rules;
+    draft.worldbookWriteSource = restored.source;
+    draft.worldbookWriteBooks = restored.books;
+  }
+  const cleanPresets = payload.presets.map(preset => {
+    if (preset[WORLD_BOOK_WRITE_KEY] === undefined) return preset;
+    const copy = { ...preset };
+    delete copy[WORLD_BOOK_WRITE_KEY];
+    return copy;
+  });
+  const merged = mergeStoredPresets(draft.presets, cleanPresets, { keepLocal: false, source: 'paste' });
   draft.presets = merged.presets;
   if (draft.presetName === '' && merged.presets.length > 0) draft.presetName = merged.presets[0].name;
   presetNote.value = UI.plot.ioImported(merged.added, merged.replaced, merged.skipped + payload.skipped);
@@ -741,12 +926,25 @@ const modelOptions = reactive<Record<string, string[]>>({});
 const modelNotes = reactive<Record<string, string>>({});
 const pullingModelOf = ref('');
 
+/** 当前在途的模型拉取；切渠道、关面板、超时总预算都靠它掐断（批 42）。 */
+let modelsFetchCtl: AbortController | null = null;
+
 async function pullModels(api: PlotApiEntry): Promise<void> {
   if (pullingModelOf.value !== '') return;
+  // 在途拉取的闸门（批 42）：切换渠道 / 关闭面板时 abort，30 秒总预算到点也会自动断
+  modelsFetchCtl?.abort();
+  const ctl = new AbortController();
+  modelsFetchCtl = ctl;
   pullingModelOf.value = api.name;
   modelNotes[api.name] = UI.plot.apisPullModelsBusy;
   try {
-    const outcome = await fetchModelList({ url: api.url, apiKey: api.apiKey });
+    const outcome = await fetchModelList({ url: api.url, apiKey: api.apiKey }, undefined, { signal: ctl.signal });
+    if (ctl.signal.aborted) {
+      // 已被掐断：结果作废，只把那一条的忙态文案收尾（别的渠道不受影响）
+      modelOptions[api.name] = [];
+      modelNotes[api.name] = UI.plot.apisPullModelsCancelled;
+      return;
+    }
     if (outcome.ok) {
       modelOptions[api.name] = outcome.models;
       // 只有一个候选时直接填上：这种情况下让用户再点一次毫无意义
@@ -757,6 +955,7 @@ async function pullModels(api: PlotApiEntry): Promise<void> {
       modelNotes[api.name] = UI.plot.apisPullModelsFailed(outcome.reason);
     }
   } finally {
+    if (modelsFetchCtl === ctl) modelsFetchCtl = null;
     pullingModelOf.value = '';
   }
 }
@@ -809,7 +1008,7 @@ function addApi(): void {
     apiKey: '',
     model: '',
     source: '',
-    maxTokens: 60000,
+    maxTokens: DEFAULT_MAX_TOKENS,
     temperature: 1,
     importedFrom: '',
     bodyParams: '',
@@ -869,6 +1068,16 @@ const draftApiName = ref('');
 
 const editingApi = computed(() => draft.apis.find((api) => api.name === draftApiName.value));
 
+// ── 在途拉取的自动掐断（批 42 用户定）──
+// 切换正在查看的渠道、切换「当前 API」、面板关闭：三条路上挂着的那次拉取立刻放弃，
+// 不许它占着忙态让别的渠道拉不了。onUnmounted 由 vue 自动导入。
+watch(draftApiName, () => modelsFetchCtl?.abort());
+watch(
+  () => draft.activeApiName,
+  () => modelsFetchCtl?.abort(),
+);
+onUnmounted(() => modelsFetchCtl?.abort());
+
 /** 保证「正在看」的那条仍然存在：导入、删除、改名之后都要过一遍。 */
 function ensureDraftApi(): void {
   if (draft.apis.length === 0) {
@@ -901,7 +1110,7 @@ watch(() => draft.apis.length, ensureDraftApi, { immediate: true });
 
 // ——— 「预览这次会发什么」 ———
 //
-// 为什么要有：面板上列的是模板（`$8`、`{{zhaohui}}` 原样写着），用户看不出
+// 为什么要有：面板上列的是模板（`$8` 等占位符原样写着），用户看不出
 // 「这一按下去 AI 到底读到什么」。这里拿真数据跑一遍同一套渲染，把结果摊开给他看。
 // 只读：不写设置、不碰暂存、不发请求。
 const previewOpen = ref(false);
@@ -1370,6 +1579,127 @@ function keyMask(key: string): string {
       </div>
 
       <!--
+        世界书写入（2026-11-07 批 36-38）：把规则选中的标签块写成世界书条目。
+        与上面「世界书（$1）」是读与写两件事 —— 那块管任务提示词读哪几本书，
+        这一块管把成果写进哪本书。字段（worldbookWrite*）与控件都分开摆。
+      -->
+      <div class="acu-section">
+        <h4>{{ UI.plot.wbWriteSection }}</h4>
+        <p class="acu-notes">{{ UI.plot.wbWriteHint }}</p>
+
+        <div class="acu-row acu-row--inline">
+          <span class="acu-toggle__label">{{ UI.plot.wbWriteSource }}</span>
+          <label class="acu-toggle">
+            <input v-model="draft.worldbookWriteSource" type="radio" value="character" />
+            <span class="acu-toggle__label">{{ UI.plot.wbWriteFollow }}</span>
+          </label>
+          <label class="acu-toggle">
+            <input v-model="draft.worldbookWriteSource" type="radio" value="manual" />
+            <span class="acu-toggle__label">{{ UI.plot.wbWriteManual }}</span>
+          </label>
+        </div>
+        <p class="acu-notes acu-notes--sm">
+          {{ draft.worldbookWriteSource === 'manual' ? UI.plot.wbWriteManualHint : UI.plot.wbWriteFollowHint }}
+        </p>
+
+        <!-- 手动选书：与读侧那格同一个书架（wbBooks），搜索词分开，互不打扰 -->
+        <template v-if="draft.worldbookWriteSource === 'manual'">
+          <p class="acu-notes acu-notes--sm">{{ UI.plot.wbWritePickHint }}</p>
+          <p v-if="wbBooks.length === 0 && !wbLoading" class="acu-notes acu-notes--warn">{{ UI.plot.worldbookEmpty }}</p>
+          <template v-else>
+            <div class="acu-row">
+              <input
+                v-model="wbWriteQuery"
+                class="acu-input"
+                type="search"
+                :placeholder="UI.plot.wbWriteSearch"
+                style="flex: 1 1 auto; min-width: 0"
+              />
+              <span class="acu-notes acu-notes--sm" style="margin: 0">
+                {{ UI.plot.worldbookCount(filteredWriteBooks.length, wbBooks.length) }}
+              </span>
+            </div>
+            <p v-if="filteredWriteBooks.length === 0" class="acu-notes acu-notes--sm">{{ UI.plot.worldbookNoMatch }}</p>
+            <div v-else class="acu-wb-list">
+              <label v-for="name in filteredWriteBooks" :key="'wbw-book-' + name" class="acu-toggle acu-wb-item">
+                <input
+                  type="checkbox"
+                  :checked="draft.worldbookWriteBooks.includes(name)"
+                  @change="toggleWbWriteBook(name)"
+                />
+                <span class="acu-toggle__label">{{ name }}</span>
+              </label>
+            </div>
+          </template>
+        </template>
+
+        <div class="acu-row acu-row--inline">
+          <span class="acu-toggle__label">{{ UI.plot.wbWriteRuleSection }}</span>
+          <button
+            class="acu-btn acu-btn--sm"
+            type="button"
+            :disabled="wbWriteTagOptions.length === 0"
+            @click="addWbWriteRule"
+          >
+            {{ UI.plot.wbWriteAdd }}
+          </button>
+        </div>
+        <p class="acu-notes acu-notes--sm">{{ UI.plot.wbWriteRuleHint }}</p>
+        <p v-if="wbWriteTagOptions.length === 0" class="acu-notes acu-notes--warn">{{ UI.plot.wbWriteNoTags }}</p>
+        <div
+          v-for="(rule, index) in draft.worldbookWriteRules"
+          :key="'wbw-rule-' + index"
+          class="acu-row acu-row--inline"
+        >
+          <label class="acu-toggle">
+            <input v-model="rule.enabled" type="checkbox" />
+            <span class="acu-toggle__label">{{ UI.plot.wbWriteEnabled }}</span>
+          </label>
+          <select v-model="rule.tagName" class="acu-select" style="flex: 0 1 160px; min-width: 0">
+            <option v-for="name in wbWriteTagOptions" :key="name" :value="name">{{ name }}</option>
+            <!-- 预设换了之后规则里可能留着旧标签名：补一个选项，别让下拉显示成空白 -->
+            <option v-if="!wbWriteTagOptions.includes(rule.tagName)" :value="rule.tagName">{{ rule.tagName }}</option>
+          </select>
+          <input
+            v-model="rule.entryName"
+            class="acu-input"
+            type="text"
+            :placeholder="UI.plot.wbWriteEntryNamePlaceholder(rule.tagName)"
+            style="flex: 1 1 140px; min-width: 0"
+          />
+          <input v-model.number="rule.depth" class="acu-input" type="number" min="1" style="width: 64px" :title="UI.plot.wbWriteDepthHint" />
+          <input v-model.number="rule.order" class="acu-input" type="number" min="0" style="width: 84px" :title="UI.plot.wbWriteOrderHint" />
+          <button class="acu-btn acu-btn--sm" type="button" @click="removeWbWriteRule(index)">
+            {{ UI.plot.wbWriteRemove }}
+          </button>
+        </div>
+        <p v-if="draft.worldbookWriteRules.length > 0" class="acu-notes acu-notes--sm">
+          {{ UI.plot.wbWriteDepthHint }}{{ UI.plot.wbWriteOrderHint }}
+        </p>
+
+        <!-- 两个清理按钮（批 36 用户定）：范围与认领口径刻意不同，见 wbWriteCleanHint -->
+        <div class="acu-row acu-row--inline">
+          <button
+            class="acu-btn acu-btn--sm"
+            type="button"
+            :disabled="wbWriteCleaning !== null"
+            @click="runWbCleanup('current')"
+          >
+            {{ UI.plot.wbWriteCleanCurrent }}
+          </button>
+          <button
+            class="acu-btn acu-btn--sm"
+            type="button"
+            :disabled="wbWriteCleaning !== null"
+            @click="runWbCleanup('all')"
+          >
+            {{ UI.plot.wbWriteCleanAll }}
+          </button>
+        </div>
+        <p class="acu-notes acu-notes--sm">{{ UI.plot.wbWriteCleanHint }}</p>
+      </div>
+
+      <!--
         `$7 默认上下文`：有预设就改预设里的（预设覆盖全局），没预设就改全局兜底 ——
         没导入预设也能设，这一块不再整块消失、只剩一个标题。
       -->
@@ -1436,6 +1766,8 @@ function keyMask(key: string): string {
           :tasks="editorTasks"
           :preset-name="draft.presetName"
           :api-names="draft.apis.map((api) => api.name)"
+          @copy-task="openCopyPaste('task', $event)"
+          @copy-block="openCopyPaste('block', $event)"
         />
         <p class="acu-notes acu-notes--sm">{{ UI.plot.presetEditIntro }}</p>
       </template>
@@ -1446,7 +1778,8 @@ function keyMask(key: string): string {
     <!-- ④ 暂存：同一楼层的多版成果在这里看、改、删 -->
     <div v-show="page === 4" class="acu-page">
       <p v-if="draft.stashMode === 'qrf'" class="acu-notes">{{ UI.plot.stashQrfModeNote }}</p>
-      <StashPanel v-else />
+      <!-- ctx 只为把「使用中」版本的编辑同步进世界书（批 45） -->
+      <StashPanel v-else :ctx="ctx" />
     </div>
 
     <!-- ⑤ 运行日志（对应工作流助手第 4 页）：每轮每任务的提示词 / 回传 / 耗时 / 报错 -->
@@ -1507,7 +1840,7 @@ function keyMask(key: string): string {
             <div v-if="previewTask === null" class="acu-notes">{{ UI.plot.previewNoTask }}</div>
             <template v-else>
               <p class="acu-notes acu-notes--sm acu-preview__note">
-                {{ UI.plot.previewTaskMeta(previewTask.stage, previewTask.order, previewTask.messages.length) }}
+                {{ UI.plot.previewTaskMeta(previewTask.stage, previewTask.messages.length) }}
               </p>
               <div v-for="(message, index) in previewTask.messages" :key="index" class="acu-preview__msg">
                 <span class="acu-preview__role">{{ message.role }}</span>
@@ -1519,6 +1852,15 @@ function keyMask(key: string): string {
         </template>
       </div>
     </div>
+
+    <CopyPasteDialog
+      v-if="copyPasteOpen"
+      :kind="clipKind ?? 'block'"
+      :source="clipSource"
+      :targets="pasteTargets"
+      @pick="pasteTo"
+      @close="copyPasteOpen = false"
+    />
   </div>
 </template>
 

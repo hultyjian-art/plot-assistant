@@ -100,6 +100,10 @@ export function mountGestureWatch(ctx: RerushContext): void {
     const { key, name } = outcomeOfTaps(ctx.settings.bindings, tapRun, waited);
     tapRun = 0;
     cancelTapWindow();
+    // 结算这一指时，上一次按压可能还挂着 holdTimer，pressActive 也还没复位；
+    // 不摘干净的话，结算完手势又会补发一次长按动作（点一下再按住 = 两个动作）。
+    cancelHoldTimer();
+    pressActive = false;
     runGestureAction(ctx, key, name);
   };
 
@@ -156,7 +160,12 @@ export function mountGestureWatch(ctx: RerushContext): void {
     paintLock($chip, true);
     holdFired = false;
     cancelHoldTimer();
+    // 新一次按压开始，把上一指留的连击结算窗口也作废：否则「点一下再按住」时
+    // 旧的 tapWindowTimer 和新的 holdTimer 会各派发一个动作。
+    cancelTapWindow();
     holdTimer = window.setTimeout(() => {
+      // 按下时没锁、等待期间别的动作占住了锁（其余四处入口都有这道检查）
+      if (ctx.state.locked) return;
       holdFired = true;
       logInfo(TAG.hand, MSG.holdFired);
       runGestureAction(ctx, ctx.settings.bindings.hold, MSG.tapHold);

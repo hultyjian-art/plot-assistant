@@ -1,0 +1,769 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   剧情推进页的结构件 —— 移植自工作流助手 `ui/acu-theme.css`
+
+   为什么是移植而不是自己写：那套界面是同一条业务链上的成熟实现（工作流助手本身
+   就是数据库剧情推进的二创），分区、间距、控件形态都经过长期使用检验。照抄它的
+   结构与数值，比重新发明一套更省事，也更不容易长歪。
+
+   两条改动，其余原样：
+     1. 令牌换成宿主颜色 —— 原文件用 --acu-* 变量（由 ui/theme.ts 注入奶油/深色两套
+        主题），这里统一映射到本面板既有的 --rh-* 配色，外观与面板其余部分保持一致。
+     2. 作用域加 .rh-card 前缀，且视觉属性带 !important —— 理由同本文件开头那段
+        隔离层说明：酒馆主题会直接命中控件，必须钉死；前缀则防止这套新规则反过来
+        影响推进重刷页。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.rh-card {
+  --acu-bg-0: var(--rh-bg);
+  --acu-bg-1: var(--rh-bg-pure);
+  --acu-bg-2: var(--rh-bg-soft);
+  --acu-bg-3: var(--rh-bg-hover);
+  --acu-border: var(--rh-line);
+  --acu-border-2: var(--rh-line-input);
+  --acu-text-1: var(--rh-fg);
+  --acu-text-2: var(--rh-fg-soft);
+  --acu-text-3: var(--rh-fg-dim);
+  --acu-accent: var(--rh-accent);
+  --acu-accent-2: var(--rh-accent-deep);
+  --acu-on-accent: #fefeff;
+  --acu-accent-glow: var(--rh-accent-ring);
+  --acu-success: var(--rh-ok);
+  --acu-warning: #b45309;
+  --acu-danger: var(--rh-danger);
+  --acu-hover-overlay: rgba(16, 18, 27, 0.06);
+  --acu-radius-lg: 12px;
+  --acu-radius-md: 10px;
+  --acu-radius-sm: 8px;
+  --acu-shadow: 0 12px 32px var(--rh-shadow);
+  --acu-font-ui: var(--rh-font);
+  --acu-font-mono: var(--rh-font-mono);
+  --acu-font-size-caption: 11px;
+  --acu-font-size-body: 12px;
+  --acu-font-size-body-lg: 13px;
+  --acu-font-size-panel-title: 14px;
+  --acu-line-height-body: 1.45;
+}
+
+/* ── 分页标签 ── */
+.rh-card .acu-page-tabs {
+  display: flex !important;
+  gap: 4px !important;
+  padding: 10px 14px !important;
+  background: var(--acu-bg-1) !important;
+  border-bottom: 1px solid var(--acu-border) !important;
+  /* 照工作流助手：页签在内容滚动时钉在顶部（滚动容器是 .rh-card-body） */
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 3 !important;
+}
+
+.rh-card .acu-page-tab {
+  flex: 1 !important;
+  border: 0 !important;
+  background: transparent !important;
+  padding: 8px 10px !important;
+  font-family: inherit !important;
+  font-size: var(--acu-font-size-body-lg) !important;
+  color: var(--acu-text-3) !important;
+  cursor: pointer !important;
+  border-radius: var(--acu-radius-sm) !important;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.rh-card .acu-page-tab:hover {
+  color: var(--acu-text-1) !important;
+  background: var(--acu-hover-overlay) !important;
+}
+
+.rh-card .acu-page-tab__short {
+  display: none;
+}
+
+.rh-card .acu-page-tab.active {
+  color: var(--acu-on-accent) !important;
+  background: var(--acu-accent) !important;
+  font-weight: 600 !important;
+}
+
+.rh-card .acu-page {
+  min-height: 200px !important;
+  width: 100% !important;
+}
+
+/* ── 区块 ── */
+.rh-card .acu-section {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  width: 100% !important;
+  padding: 16px !important;
+  margin-bottom: 14px !important;
+  background: var(--acu-bg-1) !important;
+  border: 1px solid var(--acu-border) !important;
+  border-radius: var(--acu-radius-md) !important;
+}
+
+.rh-card .acu-section h4 {
+  margin: 0 0 10px !important;
+  font-size: var(--acu-font-size-panel-title) !important;
+  font-weight: 600 !important;
+  line-height: 1.3 !important;
+  color: var(--acu-text-1) !important;
+}
+
+.rh-card .acu-row {
+  display: flex !important;
+  gap: 8px !important;
+  align-items: center !important;
+  flex-wrap: wrap !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  margin-bottom: 8px !important;
+}
+
+.rh-card .acu-row--inline {
+  flex-wrap: nowrap !important;
+}
+
+/*
+ 行内字段名。
+ 固定一列宽、不换行：否则「这个任务的最终指令」这种长标签会折成两截，
+ 而「最少字数」这类短标签又会被前面几个输入框挤到下一行去。
+*/
+.rh-card .rh-field-label {
+  flex: 0 0 auto !important;
+  white-space: nowrap !important;
+}
+
+.rh-card .acu-row label {
+  color: var(--acu-text-2) !important;
+  font-size: var(--acu-font-size-body) !important;
+}
+
+.rh-card .acu-notes {
+  margin-bottom: 8px !important;
+  font-size: var(--acu-font-size-body) !important;
+  line-height: var(--acu-line-height-body) !important;
+  color: var(--acu-text-3) !important;
+}
+
+.rh-card .acu-notes--sm {
+  margin-bottom: 4px !important;
+  font-size: var(--acu-font-size-caption) !important;
+}
+
+/* 提示文字的三档语气：账本读坏了/保存失败要红，操作成功要绿，其余警示用橙。
+   暂存面板用它们区分三句话，否则三句长得一样，用户看不出哪句是坏消息。 */
+
+/* 世界书勾选列表：一列铺开、能滚，书多的时候不至于把页面顶到很远 */
+.rh-card .acu-wb-list {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px !important;
+  max-height: 220px !important;
+  overflow-y: auto !important;
+  padding: 8px 10px !important;
+  border: 1px solid var(--acu-border) !important;
+  border-radius: 10px !important;
+  background: var(--acu-bg-2) !important;
+}
+
+.rh-card .acu-wb-item {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  font-size: 13px !important;
+  line-height: 1.4 !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+
+/* 条目级勾选：跟书单长得像，但一本书一个块，条目多了在框里滚 */
+.rh-card .acu-wb-entries {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px !important;
+  margin-top: 10px !important;
+}
+
+.rh-card .acu-wb-entry-box {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 10px !important;
+  max-height: 340px !important;
+  overflow-y: auto !important;
+  padding: 10px 12px !important;
+  border: 1px solid var(--acu-border) !important;
+  border-radius: 10px !important;
+  background: var(--acu-bg-2) !important;
+}
+
+.rh-card .acu-wb-entry-book {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+}
+
+/* 书名行：书名长了会换行，别把按钮挤成竖排 */
+.rh-card .acu-wb-entry-head {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 6px !important;
+  padding-bottom: 4px !important;
+  border-bottom: 1px dashed var(--acu-border) !important;
+}
+
+.rh-card .acu-wb-entry-name {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  line-height: 1.4 !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+
+.rh-card .acu-wb-entry-tag {
+  flex: 0 0 auto !important;
+  padding: 0 5px !important;
+  border: 1px solid var(--acu-border) !important;
+  border-radius: 6px !important;
+  font-size: 11px !important;
+  line-height: 16px !important;
+  opacity: 0.75 !important;
+  white-space: nowrap !important;
+}
+
+.rh-card .acu-wb-entry-item {
+  display: flex !important;
+  align-items: flex-start !important;
+  gap: 6px !important;
+  padding-left: 2px !important;
+  font-size: 13px !important;
+  line-height: 1.45 !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+
+.rh-card .acu-wb-entry-item input {
+  flex: 0 0 auto !important;
+  margin-top: 3px !important;
+}
+
+/* 本来就不进上下文的条目：灰掉，勾也勾不上，省得有人以为勾回来就能救 */
+.rh-card .acu-wb-entry-item--off {
+  opacity: 0.45 !important;
+}
+
+.rh-card .acu-notes--warn {
+  color: var(--acu-warning) !important;
+}
+
+.rh-card .acu-notes--error {
+  color: var(--acu-danger) !important;
+}
+
+.rh-card .acu-notes--ok {
+  color: var(--acu-success) !important;
+}
+
+/* ── 表单控件 ── */
+.rh-card .acu-input:not([type='checkbox']):not([type='radio']),
+.rh-card .acu-select,
+.rh-card .acu-textarea {
+  min-height: 32px !important;
+  padding: 6px 9px !important;
+  border: 1px solid var(--acu-border) !important;
+  border-radius: var(--acu-radius-sm) !important;
+  background-color: var(--acu-bg-2) !important;
+  color: var(--acu-text-1) !important;
+  font: inherit !important;
+  font-size: var(--acu-font-size-body) !important;
+  caret-color: var(--acu-text-1) !important;
+}
+
+.rh-card .acu-input:focus,
+.rh-card .acu-select:focus,
+.rh-card .acu-textarea:focus {
+  outline: none !important;
+  border-color: var(--acu-accent) !important;
+  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;
+}
+
+.rh-card .acu-select {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  padding-right: 28px !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23616b79' d='M2.5 4.5 6 8l3.5-3.5'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 8px center !important;
+  background-size: 12px !important;
+}
+
+.rh-card .acu-select option {
+  background-color: var(--acu-bg-1) !important;
+  color: var(--acu-text-1) !important;
+}
+
+.rh-card .acu-textarea {
+  width: 100% !important;
+  min-height: 96px !important;
+  padding: 8px 10px !important;
+  line-height: var(--acu-line-height-body) !important;
+  resize: vertical !important;
+}
+
+.rh-card .acu-input::placeholder,
+.rh-card .acu-textarea::placeholder {
+  color: var(--acu-text-3) !important;
+  opacity: 1 !important;
+}
+
+/* ── 开关 ── */
+.rh-card .acu-toggle {
+  position: relative !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  color: var(--acu-text-1) !important;
+  flex: 0 0 auto !important;
+}
+
+.rh-card .acu-toggle__input[type='checkbox'] {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  clip-path: inset(50%) !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.rh-card .acu-toggle__track {
+  position: relative !important;
+  flex: 0 0 auto !important;
+  width: 44px !important;
+  height: 26px !important;
+  border-radius: 999px !important;
+  background: var(--acu-bg-3) !important;
+  border: 1px solid var(--acu-border) !important;
+  transition: background 0.2s ease, border-color 0.2s ease !important;
+}
+
+.rh-card .acu-toggle__track::after {
+  content: '' !important;
+  position: absolute !important;
+  top: 2px !important;
+  left: 2px !important;
+  width: 20px !important;
+  height: 20px !important;
+  border-radius: 50% !important;
+  background: #ffffff !important;
+  box-shadow: 0 1px 3px rgba(16, 18, 27, 0.28) !important;
+  transition: transform 0.2s ease !important;
+}
+
+.rh-card .acu-toggle:has(.acu-toggle__input:checked) .acu-toggle__track {
+  background: var(--acu-accent) !important;
+  border-color: var(--acu-accent) !important;
+}
+
+.rh-card .acu-toggle:has(.acu-toggle__input:checked) .acu-toggle__track::after {
+  transform: translateX(18px) !important;
+}
+
+.rh-card .acu-toggle__label {
+  font-size: var(--acu-font-size-body-lg) !important;
+  line-height: 1.35 !important;
+  color: var(--acu-text-1) !important;
+  overflow-wrap: anywhere !important;
+}
+
+/* ── 按钮 ── */
+.rh-card .acu-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  min-height: 32px !important;
+  padding: 6px 12px !important;
+  border: 0 !important;
+  border-radius: var(--acu-radius-sm) !important;
+  background: var(--acu-bg-2) !important;
+  color: var(--acu-text-1) !important;
+  font: inherit !important;
+  font-size: var(--acu-font-size-body-lg) !important;
+  cursor: pointer !important;
+  transition: background 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+}
+
+.rh-card .acu-btn:hover:not(:disabled) {
+  background: var(--acu-bg-3) !important;
+}
+
+.rh-card .acu-btn:disabled {
+  opacity: 0.5 !important;
+  cursor: not-allowed !important;
+}
+
+.rh-card .acu-btn.primary {
+  background: var(--acu-accent) !important;
+  color: var(--acu-on-accent) !important;
+  font-weight: 500 !important;
+}
+
+.rh-card .acu-btn.danger {
+  background: rgba(180, 35, 24, 0.1) !important;
+  color: var(--acu-danger) !important;
+}
+
+.rh-card .acu-btn--sm {
+  min-height: 28px !important;
+  padding: 4px 10px !important;
+  font-size: var(--acu-font-size-body) !important;
+}
+
+/* ── 任务卡片行 ── */
+.rh-card .acu-task-tabs {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 6px !important;
+  margin-bottom: 10px !important;
+}
+
+.rh-card .task-card {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  padding: 7px 12px !important;
+  border: 0 !important;
+  border-radius: var(--acu-radius-sm) !important;
+  background: var(--acu-bg-2) !important;
+  color: var(--acu-text-2) !important;
+  font-size: var(--acu-font-size-body) !important;
+  cursor: pointer !important;
+}
+
+.rh-card .task-card:hover {
+  background: var(--acu-bg-3) !important;
+  color: var(--acu-text-1) !important;
+}
+
+.rh-card .task-card.active {
+  background: var(--acu-accent) !important;
+  color: var(--acu-on-accent) !important;
+  font-weight: 600 !important;
+}
+
+.rh-card .task-card__stage {
+  flex: 0 0 auto !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-width: 22px !important;
+  padding: 1px 6px !important;
+  border-radius: 999px !important;
+  background: rgba(124, 58, 237, 0.14) !important;
+  color: var(--rh-accent-deep) !important;
+  font-size: var(--acu-font-size-caption) !important;
+  font-weight: 600 !important;
+  line-height: 1.4 !important;
+}
+
+.rh-card .task-card.active .task-card__stage {
+  background: rgba(255, 255, 255, 0.24) !important;
+  color: var(--acu-on-accent) !important;
+}
+
+.rh-card .task-card__name {
+  min-width: 0 !important;
+}
+
+.rh-card .task-card__flag {
+  flex: 0 0 auto !important;
+  padding: 1px 6px !important;
+  border-radius: 999px !important;
+  background: rgba(180, 83, 9, 0.16) !important;
+  color: var(--acu-warning) !important;
+  font-size: var(--acu-font-size-caption) !important;
+  font-weight: 600 !important;
+  line-height: 1.4 !important;
+}
+
+.rh-card .task-card__move {
+  flex: 0 0 auto !important;
+  width: 20px !important;
+  height: 20px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 4px !important;
+  background: rgba(255, 255, 255, 0.22) !important;
+  color: inherit !important;
+  font-size: 10px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+}
+
+.rh-card .task-card__move:disabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+}
+
+/* ── 提示词块（折叠卡） ── */
+.rh-card .acu-prompt-group {
+  margin-bottom: 10px !important;
+  border: 1px solid var(--acu-border) !important;
+  border-radius: var(--acu-radius-sm) !important;
+  overflow: hidden !important;
+  background: var(--acu-bg-2) !important;
+}
+
+.rh-card .acu-prompt-group--disabled {
+  opacity: 0.72 !important;
+}
+
+.rh-card .acu-prompt-group__header-row {
+  display: flex !important;
+  align-items: stretch !important;
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
+.rh-card .acu-prompt-group__header {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  padding: 10px 12px !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: inherit !important;
+  font: inherit !important;
+  text-align: left !important;
+  cursor: pointer !important;
+}
+
+.rh-card .acu-prompt-group__header:hover {
+  background: var(--acu-hover-overlay) !important;
+}
+
+.rh-card .acu-prompt-group__header-main {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+.rh-card .acu-prompt-group__header-name {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  font-size: var(--acu-font-size-body) !important;
+  font-weight: 600 !important;
+  color: var(--acu-text-1) !important;
+}
+
+.rh-card .acu-prompt-group__role-tag {
+  flex: 0 0 auto !important;
+  padding: 1px 6px !important;
+  border: 1px solid var(--acu-border) !important;
+  border-radius: 4px !important;
+  background: var(--acu-bg-1) !important;
+  color: var(--acu-text-3) !important;
+  font-size: 11px !important;
+  line-height: 1.2 !important;
+}
+
+.rh-card .acu-prompt-group__chevron {
+  flex: 0 0 auto !important;
+  font-size: 12px !important;
+  color: var(--acu-text-3) !important;
+}
+
+.rh-card .acu-prompt-group__body {
+  padding: 0 12px 12px !important;
+  border-top: 1px solid var(--acu-border) !important;
+}
+
+.rh-card .acu-prompt-group__toolbar {
+  display: flex !important;
+  align-items: center !important;
+  /* 一行放得下就别折：折了之后开关和「删除」会被挤到下一行，看着像两个不相干的控件 */
+  flex-wrap: nowrap !important;
+  gap: 6px !important;
+  width: 100% !important;
+  margin-top: 8px !important;
+}
+
+.rh-card .acu-prompt-group__name {
+  /* 名字这一格可以被压窄（它只是个备注），其余控件保持各自宽度 */
+  flex: 1 1 70px !important;
+  min-width: 72px !important;
+  width: auto !important;
+}
+
+.rh-card .acu-prompt-group__toolbar > .acu-btn,
+.rh-card .acu-prompt-group__toolbar > .acu-select,
+.rh-card .acu-prompt-group__enable,
+.rh-card .acu-prompt-group__delete {
+  flex: 0 0 auto !important;
+}
+
+.rh-card .acu-prompt-group__enable {
+  display: inline-flex !important;
+  align-items: center !important;
+  flex: 0 0 auto !important;
+}
+
+.rh-card .acu-prompt-group__delete {
+  margin-left: auto !important;
+  flex: 0 0 auto !important;
+}
+
+.rh-card .acu-prompt-group .acu-textarea {
+  margin-top: 6px !important;
+  background-color: var(--acu-bg-1) !important;
+}
+
+/* ── 帮助气泡 ── */
+.rh-card .acu-label-with-help {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  flex: 0 0 auto !important;
+}
+
+.rh-card .acu-help-icon-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--acu-text-3) !important;
+  font-size: 0.95em !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+}
+
+.rh-card .acu-help-icon-btn:hover,
+.rh-card .acu-help-icon-btn[aria-expanded='true'] {
+  color: var(--acu-accent) !important;
+}
+
+.rh-card .acu-collapsible-help {
+  margin: 4px 0 10px !important;
+  padding: 10px 12px !important;
+  border: 1px solid var(--acu-border) !important;
+  border-left: 3px solid var(--acu-accent) !important;
+  border-radius: var(--acu-radius-sm) !important;
+  background: var(--acu-bg-2) !important;
+}
+
+.rh-card .acu-collapsible-help p {
+  margin: 0 !important;
+  font-size: var(--acu-font-size-body) !important;
+  line-height: var(--acu-line-height-body) !important;
+  color: var(--acu-text-2) !important;
+}
+
+.rh-card .acu-collapsible-help code {
+  padding: 1px 4px !important;
+  border-radius: 4px !important;
+  background: var(--acu-bg-1) !important;
+  color: var(--acu-text-1) !important;
+  font-family: var(--acu-font-mono) !important;
+  font-size: 11px !important;
+}
+
+/* ── 分页脚 ── */
+.rh-card .acu-page-footer {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 10px !important;
+  padding: 10px 0 2px !important;
+}
+
+.rh-card .acu-page-indicator {
+  min-width: 48px !important;
+  text-align: center !important;
+  font-size: var(--acu-font-size-caption) !important;
+  color: var(--acu-text-3) !important;
+}
+
+/* ── 预设工具栏（照工作流助手「任务预设」区：下拉 + 一排动作按钮） ── */
+.rh-card .acu-preset-section {
+  padding: 10px 12px !important;
+}
+
+.rh-card .acu-preset-toolbar {
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+}
+
+.rh-card .acu-preset-select {
+  flex: 1 1 160px !important;
+  min-width: 0 !important;
+}
+
+.rh-card .acu-preset-actions {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 4px !important;
+}
+
+.rh-card .acu-preset-actions .acu-btn {
+  flex: 0 0 auto !important;
+  white-space: nowrap !important;
+  padding-left: 6px !important;
+  padding-right: 6px !important;
+}
+
+/* ── 占位符说明 ── */
+.rh-card .acu-placeholder-legend {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+  margin: 4px 0 0 0 !important;
+}
+
+.rh-card .acu-placeholder-item {
+  font-size: var(--acu-font-size-body) !important;
+  line-height: 1.5 !important;
+  color: var(--acu-text-2) !important;
+}
+
+.rh-card .acu-placeholder-item code {
+  display: inline-block !important;
+  min-width: 52px !important;
+  margin-right: 4px !important;
+  padding: 0 4px !important;
+  border-radius: 4px !important;
+  background: var(--acu-bg-3) !important;
+  color: var(--acu-accent-2) !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+  font-size: var(--acu-font-size-caption) !important;
+}
+
+/* 提示词块区的「插入」按钮行：居中对齐，与 ACU 的 `acu-prompt-segs__add` 一致。
+   控件多于一个时允许整组换行，窄屏别把控件挤出可视区。 */
+.rh-card .acu-block-add {
+  display: flex !important;
+  align-items: center !important;
+  flex-wrap: wrap !important;
+  justify-content: center !important;
+  gap: 8px !important;
+}
+

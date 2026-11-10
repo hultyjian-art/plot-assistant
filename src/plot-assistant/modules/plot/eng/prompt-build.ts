@@ -1,5 +1,5 @@
 /**
- * 剧情推进 — 提示词里的占位符替换（`$1 $5 $6 $7 $8 $9 $U $C` + `sulv1..4` + `zhaohui`）
+ * 剧情推进 — 提示词里的占位符替换（`$1 $5 $6 $7 $8 $9 $U $C`）
  *
  * 这一层是「按占位符取数」的最后一步：上面各层把内容取好，这里负责把它们准确塞进提示词。
  * 纯字符串变换，不取数、不发请求。
@@ -9,24 +9,6 @@
  *  2. `$1` / `$9` 的正则带负向后行断言 `(?<!\\)`，所以写成 `\$1` 的**转义写法原样保留**，方便你不想替换时打转义。
  *  3. 其余键用**函数式替换**（`() => 值`），否则值里出现 `$&`、`$'` 这类字样会被 JS 当成替换模式串，静默吐出乱七八糟的东西。
  */
-
-/** 允许被包进 `<worldbook_context>` 信封的键。其余键直接平铺。 */
-const ENVELOPE_KEYS = ['$1', '$9'];
-
-/** 走信封的两个键之外，其余按这个顺序替换（顺序会影响互相包含时的结果）。 */
-export const REPLACEMENT_KEYS = [
-  'sulv1',
-  'sulv2',
-  'sulv3',
-  'sulv4',
-  'zhaohui',
-  '$5',
-  '$6',
-  '$7',
-  '$8',
-  '$U',
-  '$C',
-] as const;
 
 /** 把字符串里的正则元字符转义，供 `new RegExp` 使用。 */
 export function escapeRegExp(text: string): string {
@@ -77,7 +59,7 @@ export interface PerformOptions {
 /**
  * 执行占位符替换。
  *
- * 顺序很重要，照原样：先 `$1`，再 `$9`（这两个走信封），然后 `REPLACEMENT_KEYS` 逐个平铺。
+ * 顺序很重要，照原样：先 `$1`，再 `$9`（这两个走信封），然后把 `replacements` 里其余键平铺。
  * 平铺的顺序决定「值里恰好含另一个占位符」时谁先被吃 —— 不要重排。
  */
 export function performReplacements(text: string | null | undefined, options: PerformOptions): string {
@@ -104,10 +86,13 @@ export function performReplacements(text: string | null | undefined, options: Pe
   );
 
   // ── 其余键平铺 ──
-  // 遍历的是 `replacements` 自己的键（不是上面那个常量），与原件一致：
+  // 遍历 `replacements` 自己的键，与原件一致：
   // 只在 taskOverrides 里出现、replacements 里没有的键**不会**被替换。
   for (const key in replacements) {
-    if (key === '$9') continue;
+    // `$1` / `$9` 上面已经走过信封；`$1` 的值来自 options.worldbookContent，不进这张平铺表。
+    // `buildRoundReplacements` 固定返回含 `$1` 的 8 键，平铺再走一遍会让世界书正文里的 `$1`
+    // 被二次展开、`\$1` 转义失效、任务级 `$1` 覆盖失效。
+    if (key === '$9' || key === '$1') continue;
 
     const value = taskOverrides[key] !== undefined ? taskOverrides[key] : replacements[key];
     const regex = new RegExp(escapeRegExp(key), 'g');
@@ -117,9 +102,4 @@ export function performReplacements(text: string | null | undefined, options: Pe
   }
 
   return processed;
-}
-
-/** 判断某个键是不是走信封的那两个。UI 上给提示用。 */
-export function isEnvelopeKey(key: string): boolean {
-  return ENVELOPE_KEYS.includes(key);
 }

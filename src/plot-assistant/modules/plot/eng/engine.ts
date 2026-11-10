@@ -26,9 +26,10 @@
  * 3. **重试不重渲染**：消息只渲染一次，重试时原样重发（原版注释：
  *    「每次直接重发原任务消息，失败原因与次数仅用于本地诊断」）。
  */
+import { DEFAULT_RETRY_DELAY_MS } from '../../constants';
 import { aggregateTaskTags, buildFinalMessage, buildSaveContent, type PlotTaskResult } from './assemble';
 import { runTasksByStage } from './stage-run';
-import { runTaskAttempts } from './task-accept';
+import { runTaskAttempts, type PlotApiReply } from './task-accept';
 import type { TagMap } from './tags';
 
 /** 编排层需要任务具备的最小形状。字段名对齐 ACU 的任务对象，方便直接用预设里的数据。 */
@@ -40,6 +41,8 @@ export interface PlotRoundTask {
   order?: number;
   extractTags?: string;
   extractInjectTags?: string;
+  /** 豁免标签：不要求每轮回传，回传了仍照常抽取/落盘 */
+  exemptTags?: string;
   minLength?: number;
   maxRetries?: number;
 }
@@ -107,10 +110,10 @@ export interface PlotRoundOptions<T extends PlotRoundTask = PlotRoundTask> {
   tasks: T[];
   /** 最终注入模板。留空则用 `DEFAULT_DIRECTIVE`。 */
   finalDirectiveTemplate?: string;
-  /** 把一个任务渲染成 messages。占位符替换、模板变量都在这里面做。 */
-  renderMessages: (task: T, context: RenderContext) => PlotRoundMessage[];
-  /** 调一次 AI，返回原始文本。第几个 attempt 由编排层传入，方便上层记录。 */
-  callApi: (messages: PlotRoundMessage[], task: T, attemptIndex: number) => Promise<string>;
+  /** 把一个任务渲染成 messages。占位符替换、模板变量都在这里面做；允许异步（EJS 是 Promise）。 */
+  renderMessages: (task: T, context: RenderContext) => PlotRoundMessage[] | Promise<PlotRoundMessage[]>;
+  /** 调一次 AI，返回正文 + 可选推理内容。第几个 attempt 由编排层传入，方便上层记录。 */
+  callApi: (messages: PlotRoundMessage[], task: T, attemptIndex: number) => Promise<string | PlotApiReply>;
   /** 每轮开头与每次调用后都会调一次；抛异常即终止整轮（原版的 `checkCurrent`）。 */
   checkAbort?: () => void;
   /**
@@ -170,7 +173,7 @@ export interface PlotRoundOutcome {
 }
 
 const DEFAULT_RETRIES = 3;
-const DEFAULT_RETRY_DELAY = 5000;
+const DEFAULT_RETRY_DELAY = DEFAULT_RETRY_DELAY_MS;
 
 /**
  * 把起点标签伪装成一批「第 0 阶段的成功回执」。
@@ -271,7 +274,7 @@ export async function runPlotRound<T extends PlotRoundTask = PlotRoundTask>(
   const seedAggregate = aggregateTaskTags(seed);
 
   // 进度：气泡要显示「第 3 个 / 共 5 个」「阶段 2 / 共 3 阶段」。
-  // 这里只数**这一轮真要跑的**任务 —— 续跑与触发轮次筛掉的不该出现在分母里。
+  // 这里只数**这一轮真要跑的**任务 —— 续跑与触发间隔筛掉的不该出现在分母里。
   const totalTasks = activeTasks.length;
   const totalStages = new Set(activeTasks.map(task => positiveInt(task.stage, 1))).size;
   let startedTasks = 0;
@@ -298,7 +301,7 @@ export async function runPlotRound<T extends PlotRoundTask = PlotRoundTask>(
     }
 
     // 只渲染一次：重试时原样重发，与原版一致。
-    const messages = renderMessages(task, { task, stage: context.stage, relayTagMap: context.relayTagMap });
+    const messages = await renderMessages(task, { task, stage: context.stage, relayTagMap: context.relayTagMap });
 
     // 计时包住「整段尝试」而不是单次请求：用户问的是「这条任务卡了多久」，
     // 退避等待也算在里面，否则 3 次重试各 5 秒的等待会凭空消失。
@@ -307,6 +310,7 @@ export async function runPlotRound<T extends PlotRoundTask = PlotRoundTask>(
       minLength: Math.max(0, Math.floor(Number(task.minLength) || 0)),
       extractTags: task.extractTags || '',
       extractInjectTags: task.extractInjectTags || '',
+      exemptTags: task.exemptTags || '',
       maxRetries: positiveInt(task.maxRetries, DEFAULT_RETRIES),
       delayMs: retryDelayMs,
       callApi: (attemptIndex: number) => callApi(messages, task, attemptIndex),
@@ -325,6 +329,7 @@ export async function runPlotRound<T extends PlotRoundTask = PlotRoundTask>(
       success: attempt.success,
       rawResponse: attempt.rawResponse,
       lastRawResponse: attempt.lastRawResponse,
+      reasoning: attempt.reasoning,
       extractedTags: attempt.extraction?.extractedTags,
       injectOnlyTagNames: attempt.extraction?.injectOnlyTagNames,
     };

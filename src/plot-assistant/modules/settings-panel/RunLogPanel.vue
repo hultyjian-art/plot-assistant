@@ -80,6 +80,13 @@ function markOf(task: LogTaskEntry): string {
 function snippetOf(task: LogTaskEntry): string {
   const raw = (task.rawResponse || '').trim();
   if (!raw) return task.error ? t.logStatusFailed : '';
+  return snippetText(raw);
+}
+
+/** 一段文本压成一行摘要（推理内容与回传都用它）。 */
+function snippetText(text: string): string {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
   const line = raw.split('\n').find(item => item.trim()) ?? raw;
   const flat = line.trim();
   return flat.length > 22 ? `${flat.slice(0, 22)}…` : flat;
@@ -186,7 +193,7 @@ async function exportMd(): Promise<void> {
 
     <div v-for="view in views" :key="view.key" class="acu-log-round">
       <div class="acu-log-round__head">
-        <span class="acu-log-round__title">{{ t.logRound(view.round.roundIndex, view.round.floorId) }}</span>
+        <span class="acu-log-round__title">{{ t.logRound(view.round.floorId) }}</span>
         <span :class="statusClass(view.round.status)">{{ statusText(view.round.status) }}</span>
       </div>
       <div class="acu-log-round__meta">
@@ -247,13 +254,15 @@ async function exportMd(): Promise<void> {
             <pre class="acu-log-block__pre">{{ view.current.rawResponse || t.logNoRaw }}</pre>
           </details>
 
-          <!-- 最下方：AI 推理内容（默认折叠） -->
+          <!-- 最下方：AI 推理内容（默认折叠）。走酒馆助手 4.11.1+ 的 should_return_reasoning，
+               老记录没有这个字段，如实显示「没拿到」而不是假装有。 -->
           <details class="acu-log-block">
             <summary class="acu-log-block__summary">
               <span class="acu-log-block__title">{{ t.logReasoningLabel }}</span>
-              <span class="acu-log-block__size">{{ t.logExpand }}</span>
+              <span class="acu-log-block__size">{{ view.current.reasoning ? snippetText(view.current.reasoning) : t.logNoReasoning }}</span>
             </summary>
-            <p class="acu-notes acu-notes--sm">{{ t.logReasoningEmpty }}</p>
+            <pre v-if="view.current.reasoning" class="acu-log-block__pre">{{ view.current.reasoning }}</pre>
+            <p v-else class="acu-notes acu-notes--sm">{{ t.logReasoningEmpty }}</p>
           </details>
         </div>
       </template>

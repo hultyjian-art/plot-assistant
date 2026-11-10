@@ -12,9 +12,7 @@
  * 这里提前包一层的话，空内容会变成一对空标签，AI 会以为「这轮没有世界书」而不是「没开这个功能」。
  */
 
-import type { PlotTaskResult } from './assemble';
-
-/** 表里固定会有的键。顺序按「人设 → 世界书 → 前情 → 本轮」排，方便对照 ACU 的提示词。 */
+/** 表里固定会有的键。顺序按「人设 → 世界书 → 前情 → 本轮」排，方便对照提示词。 */
 export const ROUND_KEYS = [
   '$U',
   '$C',
@@ -24,14 +22,7 @@ export const ROUND_KEYS = [
   '$7',
   '$6',
   '$8',
-  'sulv1',
-  'sulv2',
-  'sulv3',
-  'sulv4',
-  'zhaohui',
 ] as const;
-
-export type RoundKey = (typeof ROUND_KEYS)[number];
 
 export interface RoundReplacementsInput {
   /** `$U` 用户人设。取值属取数层（酒馆里怎么存人设是另一件事），这里只收字符串。 */
@@ -50,25 +41,20 @@ export interface RoundReplacementsInput {
   previousPlot?: string | null;
   /** `$8` 本轮用户输入。 */
   userInput?: string | null;
-  /** 强度四档。 */
-  strengths?: Partial<Record<'sulv1' | 'sulv2' | 'sulv3' | 'sulv4', string | null>>;
-  /** 召回条数。 */
-  zhaohui?: string | number | null;
 }
 
-/** 统一把「没有 / null / undefined / 数字」收成字符串。数字是留给 `zhaohui` 的。 */
+/** 统一把「没有 / null / undefined」收成字符串。 */
 function text(value: unknown): string {
   if (value === null || value === undefined) return '';
   return String(value);
 }
 
 /**
- * 组装占位符表。**永远返回全部 13 个键**，一个不缺。
+ * 组装占位符表。**永远返回全部 8 个键**，一个不缺。
  *
  * 不要把这里做成「只返回有值的键」——那正是上面注释里说的那类静默错误。
  */
 export function buildRoundReplacements(input: RoundReplacementsInput = {}): Record<string, string> {
-  const strengths = input.strengths || {};
   return {
     $U: text(input.userPersona),
     $C: text(input.characterCard),
@@ -78,32 +64,6 @@ export function buildRoundReplacements(input: RoundReplacementsInput = {}): Reco
     $7: text(input.historyDigest),
     $6: text(input.previousPlot),
     $8: text(input.userInput),
-    sulv1: text(strengths.sulv1),
-    sulv2: text(strengths.sulv2),
-    sulv3: text(strengths.sulv3),
-    sulv4: text(strengths.sulv4),
-    zhaohui: text(input.zhaohui),
   };
 }
 
-/**
- * 有的任务要读「自己上一次的输出」而不是「上一轮的 `<plot>`」（`$6` 的 `taskId` 分支）。
- * 这个函数把某一个任务的 `$6` 单独换掉，其余键原样带过。
- */
-export function withTaskPreviousPlot(
-  replacements: Record<string, string>,
-  previousPlot: string | null | undefined,
-): Record<string, string> {
-  return { ...replacements, $6: text(previousPlot) };
-}
-
-/** 汇总这一轮一共产生了哪些标签名（供面板显示「这一轮写了哪些节」）。 */
-export function collectTagNames(results: PlotTaskResult[] | null | undefined): string[] {
-  const names = new Set<string>();
-  for (const result of results || []) {
-    if (!result || result.success !== true) continue;
-    const tags = result.extractedTags || {};
-    for (const name of Object.keys(tags)) names.add(name);
-  }
-  return [...names];
-}

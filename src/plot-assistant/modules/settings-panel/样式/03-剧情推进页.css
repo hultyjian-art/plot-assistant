@@ -1,0 +1,26 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   剧情推进页（PlotPage.vue）专用的几个样式。
+   那个组件自己不带 <style>：样式集中在这份样式文件里，和面板其余部分用同一套
+   --rh-* 令牌，将来换主题只改这一处。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+
+.rh-pick {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 1px solid var(--rh-line-soft) !important;
+  border-radius: 8px !important;
+  background-color: var(--rh-bg-pure) !important;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12.5px;
+}
+
+.rh-pick input {
+  accent-color: var(--rh-accent);
+  margin: 0;
+}
+
+

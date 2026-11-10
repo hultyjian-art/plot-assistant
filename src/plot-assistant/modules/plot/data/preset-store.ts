@@ -19,6 +19,7 @@
  */
 
 /** 一份被导入到本地的预设快照。 */
+import { isPlainObject } from '../guards';
 export interface StoredPlotPreset {
   /** 预设名。运行时就靠它对齐 —— 与数据库脚本一致，按名字而非 id。 */
   name: string;
@@ -80,7 +81,7 @@ const WRAPPER_KEYS = ['data', 'importedAt', 'name', 'source'] as const;
  * 于是落盘的是 `{name, data:{name, data:(真正的预设), …}, …}` —— 任务表和提示词全被埋进第二层。
  */
 export function isStoredPresetWrapper(value: unknown): boolean {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (!isPlainObject(value)) return false;
   const item = value as Record<string, unknown>;
   if (Object.keys(item).length !== WRAPPER_KEYS.length) return false;
   if (!WRAPPER_KEYS.every((key) => key in item)) return false;
@@ -131,7 +132,7 @@ export function makeStoredPreset(
 ): MakeStoredPresetResult {
   // 传进来的可能已经被包过一层（见 `isStoredPresetWrapper` 的注释），先剥回本体再包。
   const body = unwrapPresetPayload(raw);
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+  if (!isPlainObject(body)) {
     return { ok: false, reason: 'not-object', name: '', size: 0 };
   }
 

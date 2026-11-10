@@ -32,6 +32,14 @@ export interface StashLanding {
    * 只有 `taskRaw`（原始回传）是不够的，那是整段文本，拆不出标签归属。
    */
   taskTags?: Record<string, WorkingTaskTags>;
+  /**
+   * 落盘时「最终注入模板」里写了哪些标签 —— 也就是**本该进正文**的那些。
+   *
+   * 为什么不从 `taskTags` 推：任务抽到的标签和进正文的标签是两回事。用户可以在
+   * 最终注入指令里删掉某些 `{{标签}}`，那些标签只存档、只进世界书。
+   * **老账没有这个字段**，读的时候退回「全部标签都算」。
+   */
+  textTagNames?: string[];
   /** 是否已凑齐全部标签 */
   complete: boolean;
   /**
@@ -170,6 +178,36 @@ export function attachLandingsToChat(
  * 单任务时就是那段原始回传；多任务时按 `【剧情任务：id】` 分段 —— 读它的只有 `$6`，
  * 分段标题用 id 而不是任务名，内容不受影响。
  */
+/**
+ * 从暂存区账本取「上一轮的标签投影」，供 `{{标签}}` 占位符使用。
+ *
+ * 用户 2026-11-06 定下的口径：AI 读到暂存区里存的上一轮对应标签的投影，
+ * 不是从上一楼层的原始回传里现扫（当时明确否决了「按任务 id 取完整回传」）。
+ * 账本里每个任务的 `tags` 已是抽好的标签内容 —— 父标签（character_info）
+ * 本来就带着子标签（character_archive），只有单独写 `{{character_archive}}`
+ * 才只给子标签那份内容。
+ *
+ * 取「最近使用过的那一层」正在用的那一版；同名标签被多个任务产出时按序堆成数组，
+ * 与 `buildTagMap` 产出的形状一致，可直接并进 `{{标签}}` 的历史表。
+ */
+export function collectStashTagMap(stash: Stash | null | undefined): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  const entries = Array.isArray(stash?.entries) ? [...(stash as Stash).entries] : [];
+  if (entries.length === 0) return map;
+  entries.sort((a, b) => (Number(b.lastUsedAt) || 0) - (Number(a.lastUsedAt) || 0));
+  const saved = activeLanding(entries[0])?.taskTags;
+  if (!saved) return map;
+  for (const record of Object.values(saved)) {
+    for (const [name, content] of Object.entries(record?.tags ?? {})) {
+      if (typeof content !== 'string' || content.trim() === '') continue;
+      const bucket = map.get(name);
+      if (bucket) bucket.push(content);
+      else map.set(name, [content]);
+    }
+  }
+  return map;
+}
+
 export function saveContentOfLanding(landing: StashLanding): string {
   const pairs = Object.entries(landing.taskRaw ?? {}).filter(
     ([, text]) => typeof text === 'string' && text.trim() !== '',
@@ -252,7 +290,7 @@ export function workingFromResults(
 ): { done: string[]; pending: string[]; taskTags: Record<string, WorkingTaskTags> } {
   const byId = new Map<string, PlotTaskResult>();
   for (const result of results) {
-    if (result && result.success && typeof result.taskId === 'string' && result.taskId) byId.set(result.taskId, result);
+    if (result && typeof result.taskId === 'string' && result.taskId) byId.set(result.taskId, result);
   }
   const done: string[] = [];
   const pending: string[] = [];
@@ -263,7 +301,10 @@ export function workingFromResults(
       pending.push(task.id);
       continue;
     }
-    done.push(task.id);
+    // 失败的任务也把**已经回传的标签**记下来：用户要能在暂存区看见 AI 到底回了什么，
+    // 而不是因为「没回全」就一片空白。它不进 done，续跑时仍按任务整体重跑。
+    if (result.success) done.push(task.id);
+    else pending.push(task.id);
     taskTags[task.id] = {
       tags: { ...(result.extractedTags || {}) },
       injectOnly: Array.isArray(result.injectOnlyTagNames) ? [...result.injectOnlyTagNames] : [],
@@ -311,15 +352,27 @@ export function landingGap(landing: StashLanding, presentTags: Iterable<string>)
 
   const present = new Set<string>();
   for (const name of presentTags) {
-    if (typeof name === 'string' && name) present.add(name);
+    if (typeof name === 'string' && name) present.add(name.toLowerCase());
   }
+
+  // 新版账本记了「本该进正文」的清单；老账没有，就退回「任务抽到的全部标签」。
+  // 老账还要排除 injectOnly —— 那些标签本来就不进正文，不该被算成缺口。
+  const expected = Array.isArray(landing.textTagNames)
+    ? new Set(landing.textTagNames.filter((name) => typeof name === 'string' && name).map((name) => name.toLowerCase()))
+    : null;
 
   const tags: string[] = [];
   const taskIds: string[] = [];
   for (const [taskId, entry] of Object.entries(saved)) {
     if (!taskId || !entry || typeof entry !== 'object') continue;
-    const names = Object.keys(entry.tags || {});
-    const missing = names.filter((name) => name && !present.has(name));
+    const injectOnly = new Set((entry.injectOnly || []).map((name) => String(name).toLowerCase()));
+    const names = Object.keys(entry.tags || {}).filter((name) => {
+      if (!name) return false;
+      const lower = name.toLowerCase();
+      if (expected) return expected.has(lower);
+      return !injectOnly.has(lower);
+    });
+    const missing = names.filter((name) => !present.has(name.toLowerCase()));
     if (missing.length === 0) continue;
     taskIds.push(taskId);
     for (const name of missing) if (!tags.includes(name)) tags.push(name);

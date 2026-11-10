@@ -1,0 +1,19 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   预设编辑器（PresetEditor.vue / TaskEditor.vue / PresetIo.vue）。
+   三个组件同样不带 <style>，理由见本节开头。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+
+.rh-editor-label {
+  display: block;
+  margin: 7px 0 4px;
+  font-size: 12px;
+  color: var(--rh-fg-dim) !important;
+}
+
+
+/* 文件选择框本身不显示：样式统一的按钮去触发它 */
+.rh-hidden-file {
+  display: none;
+}
+

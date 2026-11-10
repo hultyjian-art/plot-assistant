@@ -23,6 +23,8 @@ import { performReplacements } from './prompt-build';
 import type { TagMap } from './tags';
 import { normalizeRole, replacePlaceholders } from './tags';
 import type { PlotTask } from './task-model';
+import { isBlockEnabled } from './prompt-blocks';
+import type { TavernPromptMacroSource } from '../../tavern';
 
 /** 渲染一个任务时，调用方要准备好的东西。全是「已经取好的值」，本层不碰数据源。 */
 export interface TaskRenderContext {
@@ -41,7 +43,26 @@ export interface TaskRenderContext {
   relayTagMap?: TagMap | null;
   /** 历史标签（上一轮 `<plot>` 里那些），给 `{{标签}}` 兜底。 */
   historyTagMap?: TagMap | null;
+  /**
+   * 酒馆原生宏替换（`<user>` / `{{user}}` / `<char>` / `{{char}}` 等）。
+   * 不传就不处理，保证纯函数测试与没有酒馆的环境行为不变。
+   */
+  macroReplace?: ((text: string) => string) | null;
+  /**
+   * 完整提示词模板链（酒馆正则 + ST 宏 + MacroLike → EJS → 再跑一遍宏）。
+   * 传了它就走异步渲染；不传时仍走上面的同步 `macroReplace`，老调用方不受影响。
+   */
+  templateProcess?: ((text: string, source: TavernPromptMacroSource) => Promise<string>) | null;
 }
+
+/**
+ * 提示词块一律按「斜杠命令」送进酒馆正则链，不按块上标的角色分流。
+ *
+ * 块上的 SYSTEM / USER / ASSISTANT 只是这段提示词给 AI 看的「发言身份」，
+ * 并不是酒馆里真实的用户输入或 AI 回复。拿它去套酒馆正则的
+ * 「用户输入 / AI 输出」作用范围，会让玩家为主对话配的正则误伤剧情推进任务。
+ * 与工作流助手一致：预设段固定 slash_command，不套用用户 / AI 输出作用域。
+ */
 
 /**
  * 任务的提示词组 → messages。
@@ -61,9 +82,9 @@ export function renderTaskMessages(task: PlotTask | null | undefined, context: T
   const messages: PlotRoundMessage[] = [];
   for (const segment of segments) {
     if (!segment) continue;
-    // reroll 扩展：块级开关（需求二①）。上游数据里没有 `enabled`，只有显式 false 才跳过，
-    // 因此未标记的数据与上游逐字节一致。
-    if ((segment as { enabled?: boolean }).enabled === false) continue;
+    // reroll 扩展：块级开关（需求二①）。判定收在 eng/prompt-blocks.ts 一处；
+    // 上游数据里没有 `enabled`，只有显式 false 才跳过，未标记的数据与上游逐字节一致。
+    if (!isBlockEnabled(segment)) continue;
     const raw = segment.content === null || segment.content === undefined ? '' : String(segment.content);
     if (!raw) continue;
 
@@ -74,13 +95,75 @@ export function renderTaskMessages(task: PlotTask | null | undefined, context: T
       filter: context.filter ? (value: unknown) => context.filter!(String(value ?? '')) : undefined,
       taskOverrides,
     });
-    const withTags = replacePlaceholders(filled, relayTagMap, historyTagMap);
-    if (!withTags.trim()) continue;
+    // 宏要在 `{{标签}}` 之前先换一次：`{{user}}` / `{{char}}` 同时也是酒馆宏，
+    // 如果先走 `replacePlaceholders`，它们会被当成不存在的内部标签换成空壳。
+    // 换完宏之后再替换内部标签；最后再走一次宏，兜住标签内容里自带的宏。
+    const macroed = context.macroReplace ? context.macroReplace(filled) : filled;
+    const withTags = replacePlaceholders(macroed, relayTagMap, historyTagMap);
+    const withMacros = context.macroReplace ? context.macroReplace(withTags) : withTags;
+    if (!withMacros.trim()) continue;
 
     messages.push({
       role: normalizeRole(segment.role) as PlotRoundMessage['role'],
-      content: withTags,
+      content: withMacros,
       // 块名只进日志：面板要按提示词块折叠，光看 role 分不清同角色的几段
+      name: typeof (segment as { name?: unknown }).name === 'string' ? String((segment as { name?: string }).name) : '',
+    });
+  }
+  return messages;
+}
+
+/**
+ * 异步版渲染：在同步版的基础上接完整模板链。
+ *
+ * `templateProcess` 是「酒馆正则 + ST 宏 + MacroLike → EJS → 再跑一遍宏」，
+ * 位置与同步版的 `macroReplace` 相同：先于内部标签替换，最后再兜一遍。
+ * 没有传 `templateProcess` 时退回同步 `macroReplace`，避免测试和旧调用方改行为。
+ */
+export async function renderTaskMessagesAsync(
+  task: PlotTask | null | undefined,
+  context: TaskRenderContext = {},
+): Promise<PlotRoundMessage[]> {
+  const segments = Array.isArray(task?.promptGroup) ? task!.promptGroup : [];
+  if (segments.length === 0) return [];
+
+  const replacements = context.replacements || {};
+  const taskOverrides = context.taskOverrides || {};
+  const relayTagMap: TagMap = context.relayTagMap || new Map();
+  const historyTagMap: TagMap = context.historyTagMap || new Map();
+
+  const messages: PlotRoundMessage[] = [];
+  for (const segment of segments) {
+    if (!segment) continue;
+    if (!isBlockEnabled(segment)) continue;
+    const raw = segment.content === null || segment.content === undefined ? '' : String(segment.content);
+    if (!raw) continue;
+
+    const filled = performReplacements(raw, {
+      replacements,
+      worldbookContent: context.worldbookContent ?? undefined,
+      filter: context.filter ? (value: unknown) => context.filter!(String(value ?? '')) : undefined,
+      taskOverrides,
+    });
+
+    // 固定作用域，见上方说明：不按提示词块角色套用户 / AI 输出正则。
+    const source: TavernPromptMacroSource = 'slash_command';
+    let withMacros: string;
+    if (context.templateProcess) {
+      const macroed = await context.templateProcess(filled, source);
+      const withTags = replacePlaceholders(macroed, relayTagMap, historyTagMap);
+      // 模板链只在预设原文上跑一次；标签内容来自上一轮正文，不能被当成 EJS 模板执行。
+      withMacros = context.macroReplace ? context.macroReplace(withTags) : withTags;
+    } else {
+      const macroed = context.macroReplace ? context.macroReplace(filled) : filled;
+      const withTags = replacePlaceholders(macroed, relayTagMap, historyTagMap);
+      withMacros = context.macroReplace ? context.macroReplace(withTags) : withTags;
+    }
+    if (!withMacros.trim()) continue;
+
+    messages.push({
+      role: normalizeRole(segment.role) as PlotRoundMessage['role'],
+      content: withMacros,
       name: typeof (segment as { name?: unknown }).name === 'string' ? String((segment as { name?: string }).name) : '',
     });
   }

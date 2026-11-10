@@ -8,28 +8,22 @@
  *
  * 所有增删改仍然**就地改传进来的数组**（`props.tasks`），由外层在点「应用修改」时交给
  * `applyTaskDrafts` 写回预设本体。这里不碰存储，也不碰数据库脚本。
+ *
+ * 跨预设 / 跨任务的复制不在本组件里执行：两处复制按钮都只把内容交给外层，
+ * 由外层弹出同一个「复制到哪里」子页面，选完目标再统一粘贴。
  */
 import { computed, ref, watch } from 'vue';
 import { UI } from '../copy';
 import {
-  adoptBlockDraft,
-  cloneTaskDraft,
   copyBlockDraft,
   newBlockDraft,
   newTaskDraft,
+  type TaskBlockDraft,
   type TaskDraft,
 } from '../plot/preset-edit';
-import {
-  blockClipSource,
-  copyBlockToClip,
-  copyTaskToClip,
-  hasBlockClip,
-  hasTaskClip,
-  readBlockClip,
-  readTaskClip,
-  taskClipSource,
-} from './clipboard';
+import { blockKeyOf } from './block-key';
 import PromptBlockCard from './PromptBlockCard.vue';
+import { countBlocks, moveBlock as moveBlockInList } from '../plot/eng/prompt-blocks';
 
 const props = defineProps<{
   tasks: TaskDraft[];
@@ -39,12 +33,23 @@ const props = defineProps<{
   apiNames?: string[];
 }>();
 
+/** 复制动作交给外层：外层负责写剪贴板 + 弹同一个选择窗口。 */
+const emit = defineEmits<{
+  copyTask: [task: TaskDraft];
+  copyBlock: [block: TaskBlockDraft];
+}>();
+
 const selectedIndex = ref(0);
 
 /** 任务增删后下标可能越界，夹回合法范围。 */
 const selectedTask = computed<TaskDraft | undefined>(() => props.tasks[selectedIndex.value]);
 
-const anyBlocksOff = computed(() => selectedTask.value !== undefined && selectedTask.value.blocks.some((block) => !block.enabled));
+const anyBlocksOff = computed(() => {
+  const task = selectedTask.value;
+  if (!task) return false;
+  const counts = countBlocks(task.blocks);
+  return counts.enabled < counts.total;
+});
 
 watch(
   () => props.tasks.length,
@@ -70,7 +75,7 @@ function dropTask(index: number): void {
   props.tasks.splice(index, 1);
 }
 
-/** 左右移一位：任务的先后就是跑的顺序，改完外层写回时会重排 order。 */
+/** 左右移一位：只改列表位置。同一阶段是并发跑的，位置只影响展示与标签合并先后。 */
 function moveTask(from: number, delta: -1 | 1): void {
   const to = from + delta;
   if (to < 0 || to >= props.tasks.length) return;
@@ -85,44 +90,6 @@ function addBlock(task: TaskDraft, position: 'top' | 'bottom' = 'bottom'): void 
   else task.blocks.push(block);
 }
 
-/**
- * 跨预设复制 / 粘贴。
- *
- * 走模块级剪贴板而不是「选一个目标预设直接写进去」：切预设这一步让用户自己走，
- * 他能看见自己粘进了哪份预设的哪个位置；直接写会绕开「应用修改 → 保存」两道确认。
- */
-function sendTask(task: TaskDraft | undefined): void {
-  if (!task) return;
-  copyTaskToClip(task, props.presetName ?? '');
-}
-
-function pasteTask(): void {
-  const clip = readTaskClip();
-  if (!clip) return;
-  props.tasks.push(cloneTaskDraft(clip, props.tasks));
-  selectedIndex.value = props.tasks.length - 1;
-}
-
-function sendBlock(task: TaskDraft, index: number): void {
-  const block = task.blocks[index];
-  if (!block) return;
-  copyBlockToClip(block, props.presetName ?? '');
-}
-
-function pasteBlock(task: TaskDraft): void {
-  const clip = readBlockClip();
-  if (!clip) return;
-  task.blocks.push(adoptBlockDraft(clip, task.blocks));
-}
-
-const taskPasteTitle = computed(() =>
-  hasTaskClip.value ? `${UI.plot.editorTaskPaste} · ${UI.plot.clipFrom}「${taskClipSource.value}」` : UI.plot.editorTaskPasteEmpty,
-);
-
-const blockPasteTitle = computed(() =>
-  hasBlockClip.value ? `${UI.plot.editorBlockPaste} · ${UI.plot.clipFrom}「${blockClipSource.value}」` : UI.plot.editorBlockPasteEmpty,
-);
-
 function copyBlock(task: TaskDraft, index: number): void {
   const block = task.blocks[index];
   if (!block) return;
@@ -136,13 +103,15 @@ function dropBlock(task: TaskDraft, index: number): void {
 function moveBlock(task: TaskDraft, from: number, delta: -1 | 1): void {
   const to = from + delta;
   if (to < 0 || to >= task.blocks.length) return;
-  const [block] = task.blocks.splice(from, 1);
-  task.blocks.splice(to, 0, block);
+  // 就地替换内容而不是换数组引用：props.tasks 是父组件传进来的响应式数组。
+  // 列表标识用块对象本身的稳定名字（见 block-key.ts），移动时展开状态不会串位。
+  task.blocks.splice(0, task.blocks.length, ...moveBlockInList(task.blocks, from, to));
 }
 
 /** 全部块都关掉 = 这个任务发不出任何内容，跑起来只会白等一次 AI。 */
 function allBlocksOff(task: TaskDraft): boolean {
-  return task.blocks.length > 0 && task.blocks.every((block) => !block.enabled);
+  const counts = countBlocks(task.blocks);
+  return counts.total > 0 && counts.enabled === 0;
 }
 </script>
 
@@ -178,11 +147,8 @@ function allBlocksOff(task: TaskDraft): boolean {
         </template>
       </span>
       <button class="acu-btn acu-btn--sm" type="button" :title="UI.plot.editorTaskAdd" @click="addTask">＋</button>
-      <button class="acu-btn acu-btn--sm" type="button" :title="UI.plot.editorTaskCopyHint" :disabled="!selectedTask" @click="sendTask(selectedTask)">
+      <button class="acu-btn acu-btn--sm" type="button" :title="UI.plot.editorTaskCopyHint" :disabled="!selectedTask" @click="selectedTask && emit('copyTask', selectedTask)">
         {{ UI.plot.editorTaskCopy }}
-      </button>
-      <button class="acu-btn acu-btn--sm" type="button" :title="taskPasteTitle" :disabled="!hasTaskClip" @click="pasteTask">
-        {{ UI.plot.editorTaskPaste }}
       </button>
     </div>
 
@@ -209,15 +175,12 @@ function allBlocksOff(task: TaskDraft): boolean {
       </div>
       <p class="acu-notes acu-notes--sm">{{ UI.plot.editorTaskApiHint }}</p>
 
-      <!-- 五个小参数挤进一张网格：标签在上、输入框在下，比「一行一个标签」省一半高度 -->
+      <!-- 小参数挤进一张网格：标签在上、输入框在下，比「一行一个标签」省一半高度。
+           「顺序」不再给用户配：同一阶段本来就并发跑，顺序只由任务在列表里的位置决定。 -->
       <div class="acu-field-grid">
         <label class="acu-field">
           <span class="acu-field__label">{{ UI.plot.editorTaskStage }}</span>
           <input v-model.number="selectedTask.stage" class="acu-input" type="number" min="1" />
-        </label>
-        <label class="acu-field">
-          <span class="acu-field__label">{{ UI.plot.editorTaskOrder }}</span>
-          <input v-model.number="selectedTask.order" class="acu-input" type="number" min="0" />
         </label>
         <label class="acu-field">
           <span class="acu-field__label">{{ UI.plot.editorTaskMaxRetries }}</span>
@@ -243,6 +206,12 @@ function allBlocksOff(task: TaskDraft): boolean {
         <label class="rh-field-label">{{ UI.plot.editorTaskInject }}</label>
         <input v-model="selectedTask.extractInjectTags" class="acu-input" type="text" placeholder="留空 = 全部注入" style="flex: 1 1 200px; min-width: 0" />
       </div>
+
+      <div class="acu-row">
+        <label class="rh-field-label">{{ UI.plot.editorTaskExempt }}</label>
+        <input v-model="selectedTask.exemptTags" class="acu-input" type="text" placeholder="留空 = 全部必达" style="flex: 1 1 200px; min-width: 0" />
+      </div>
+      <p class="acu-notes acu-notes--sm">{{ UI.plot.editorTaskExemptHint }}</p>
 
       <!--
         这里原来还有两块：「这个任务的最终指令」和「说明」。
@@ -276,22 +245,19 @@ function allBlocksOff(task: TaskDraft): boolean {
 
         <PromptBlockCard
           v-for="(block, blockIndex) in selectedTask.blocks"
-          :key="blockIndex"
+          :key="blockKeyOf(block)"
           :block="block"
           :index="blockIndex"
           :count="selectedTask.blocks.length"
           @move="moveBlock(selectedTask, blockIndex, $event)"
           @copy="copyBlock(selectedTask, blockIndex)"
-          @send="sendBlock(selectedTask, blockIndex)"
+          @send="emit('copyBlock', block)"
           @remove="dropBlock(selectedTask, blockIndex)"
         />
 
         <div class="acu-block-add">
           <button class="acu-btn acu-btn--sm" type="button" @click="addBlock(selectedTask, 'bottom')">
             {{ UI.plot.editorBlockAddBottom }}
-          </button>
-          <button class="acu-btn acu-btn--sm" type="button" :title="blockPasteTitle" :disabled="!hasBlockClip" @click="pasteBlock(selectedTask)">
-            {{ UI.plot.editorBlockPaste }}
           </button>
         </div>
       </div>

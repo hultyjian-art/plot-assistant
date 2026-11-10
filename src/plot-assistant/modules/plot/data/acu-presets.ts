@@ -7,6 +7,8 @@
  * 与其给用户一个选了什么也读不到的选项，不如让他去 ACU 里挑一个具名预设，或者导一个进来。
  */
 
+import { isPlainObject } from '../guards';
+
 /** ACU 暴露给外部的那一小撮接口。字段全可选，缺了就当没有。 */
 export interface AcuPresetApiLike {
   getPlotPresetNames?: () => unknown;
@@ -122,7 +124,7 @@ export function readPlotPreset(presetName: string, api: AcuPresetApiLike | null 
   } catch {
     details = null;
   }
-  if (!details || typeof details !== 'object' || Array.isArray(details)) {
+  if (!isPlainObject(details)) {
     return { ok: false, reason: 'unreadable', presetName: wanted, available };
   }
 
@@ -162,7 +164,7 @@ export function readAllPlotPresets(api: AcuPresetApiLike | null = resolveAcuPres
     }
     if (Array.isArray(raw)) {
       for (const item of raw) {
-        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        if (!isPlainObject(item)) {
           skipped += 1;
           continue;
         }

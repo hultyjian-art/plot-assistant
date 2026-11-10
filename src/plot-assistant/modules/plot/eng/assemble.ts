@@ -10,7 +10,7 @@
  *   - `extractInjectTags` 的标签即使模板里写了也不注入，只留在字段里
  *   - 一个标签都没抽到时退回任务原文，否则内容全丢
  */
-import { buildTagBlock, hasContent, lookupTag, normalizePositiveInteger, type TagMap } from './tags';
+import { buildTagBlock, hasContent, lookupTag, normalizePositiveInteger, normalizeTagBlockNewlines, type TagMap } from './tags';
 
 /** 一次任务跑完的回执。字段宽松到能直接接住 ACU 的形状。 */
 export interface PlotTaskResult {
@@ -22,6 +22,8 @@ export interface PlotTaskResult {
   rawResponse?: string;
   /** 最后一次拿到手的原文（含没过验收的那次）。只给日志用，不参与正文拼接。 */
   lastRawResponse?: string;
+  /** 模型推理内容（酒馆支持 `should_return_reasoning` 时才有）；只给日志看，不进正文。 */
+  reasoning?: string;
   extractedTags?: Record<string, string>;
   injectOnlyTagNames?: string[];
 }
@@ -96,10 +98,15 @@ export function buildRawFallbackText(taskResults: ReadonlyArray<PlotTaskResult |
   );
 
   if (successful.length === 0) return '';
-  if (successful.length === 1) return (successful[0].rawResponse as string).trim();
+  if (successful.length === 1) return normalizeTagBlockNewlines((successful[0].rawResponse as string).trim());
 
   return successful
-    .map((result) => `【剧情任务：${result.taskName || result.taskId || '未命名任务'}】\n${(result.rawResponse as string).trim()}`)
+    .map(
+      (result) =>
+        `【剧情任务：${result.taskName || result.taskId || '未命名任务'}】\n${normalizeTagBlockNewlines(
+          (result.rawResponse as string).trim(),
+        )}`,
+    )
     .join('\n\n');
 }
 
@@ -151,6 +158,11 @@ export function buildFinalMessage(
   }
 
   return [baseDirective, rawFallbackText].filter(Boolean).join('\n');
+}
+
+/** 模板里出现的 `{{标签}}` 名字（去重，按出现顺序）—— 暂存区用它判断「哪些标签本该进正文」。 */
+export function collectDirectiveTagNames(text: string): string[] {
+  return [...new Set(collectPlaceholderNames(text))];
 }
 
 /** 模板里出现的 `{{标签}}` 名字（保留重复，判空只看有没有）。 */

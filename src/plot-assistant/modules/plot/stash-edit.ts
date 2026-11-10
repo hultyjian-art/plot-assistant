@@ -129,6 +129,33 @@ function extractBody(raw: string): string {
   return raw.slice(openEnd + 1, closeStart);
 }
 
+/**
+ * 全文标签块 → 引擎聚合表的形状（`Map<标签名, 内容 | 内容[]>`）。
+ *
+ * 世界书写入（`worldbook-write.ts`）要从「面板编辑后的文本」取规则选中的标签内容，
+ * 而 `collectLandingContents` 吃的是引擎的 `aggregatedTags`（Map）—— 中间就靠这一步
+ * 把形状对齐，两边走同一个 `lookupTag` 口径。同名多块并成数组，与引擎聚合一致；
+ * 空内容的块不收（那边对空内容本来就是跳过，收进来只会白占账本）。
+ *
+ * 两种形态都认：日常的成果是「标签块散在指令正文里」（`buildFinalMessage` 的产出，
+ * 没有外壳）；但用户自定义模板可能自己包一层 `<plot>` —— 那种要先拆壳再扫，
+ * 否则外壳会被外层正则当成一个「plot 块」，里面的标签一个都拿不到。
+ */
+export function collectTextTagMap(text: string): Map<string, string[] | string> {
+  const parts = splitPlotMessage(text);
+  const blocks = parts.hasPlot ? parts.blocks : scanTagBlocks(text);
+  const map = new Map<string, string[] | string>();
+  for (const block of blocks) {
+    const body = String(block.body ?? '');
+    if (body.trim() === '') continue;
+    const existing = map.get(block.tag);
+    if (existing === undefined) map.set(block.tag, body);
+    else if (Array.isArray(existing)) existing.push(body);
+    else map.set(block.tag, [existing, body]);
+  }
+  return map;
+}
+
 /** 只做一件事的导出，给测试用：一段文本里有哪些标签名（按出现顺序去重）。 */
 export function tagNames(text: string): string[] {
   const parts = splitPlotMessage(text);

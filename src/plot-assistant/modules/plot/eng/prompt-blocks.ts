@@ -12,10 +12,11 @@
  * - **复制必须换 id**。块 id 是面板上的 React 键、也是「精确关闭某块」的凭据；
  *   直接搬原 id 会让两个任务里出现同一个 id，改一个连带改另一个。
  *
- * 这一层不碰 UI，也不碰存储。
+ * 这一层不碰 UI，也不碰存储；块开关的判定、计数、挪位由渲染层和面板共用，
+ * 免得每处各写一遍 `=== false` 慢慢走样。
  */
 
-/** 提示词块的最小形状。上游的段只有 `role` / `content` / `mainSlot` 等，这里再补三个可选键。 */
+/** 提示词块的最小形状：`role` / `content` 是上游就有的，这里再补几个面板要用的可选键。 */
 export interface PromptBlockLike {
   role?: string;
   content?: string;
@@ -34,9 +35,14 @@ export interface BlockSelection {
   ids?: string[];
 }
 
-/** 这块要不要渲染。只有显式 `false` 才算关。 */
-export function isBlockEnabled(block: PromptBlockLike | null | undefined): boolean {
-  return Boolean(block) && block!.enabled !== false;
+/**
+ * 这块要不要渲染。只有显式 `false` 才算关。
+ * 参数取 `unknown`：渲染层的 `PlotPromptSegment` 用索引签名装 `enabled`，
+ * 面板草稿则是明确的 `boolean`；两边都能直接传，调用点不必写类型断言。
+ */
+export function isBlockEnabled(block: unknown): boolean {
+  if (block === null || block === undefined || typeof block !== 'object') return false;
+  return (block as { enabled?: unknown }).enabled !== false;
 }
 
 /** 只留下要渲染的块，顺序不变。 */
@@ -154,7 +160,7 @@ export function moveBlock<T extends PromptBlockLike>(blocks: T[], from: number, 
 /**
  * 深拷贝一块并给它一个「复制品」id。
  *
- * 只拷贝已知字段（`role` / `content` / `id` / `name` / `enabled` / `mainSlot` 及其余自有键），
+ * 只拷贝已知字段（`role` / `content` / `id` / `name` / `enabled` 及其余自有键），
  * 用展开而不是 `JSON.parse(JSON.stringify())` —— 后者会把 `undefined` 键抹掉，
  * 让「显式写了 undefined」与「没写」变得无法区分（`boolField` 那一族就靠这个区别）。
  */

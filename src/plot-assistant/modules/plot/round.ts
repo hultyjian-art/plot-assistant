@@ -12,22 +12,24 @@
  */
 import { buildRoundReplacements, type RoundReplacementsInput } from './eng/round-inputs';
 import { importPresetConfig, type ImportPresetOptions, type PlotPresetConfig } from './eng/preset-import';
-import { renderTaskMessages, type TaskRenderContext } from './eng/messages';
+import { renderTaskMessagesAsync, type TaskRenderContext } from './eng/messages';
 import { buildResumePlan } from './eng/resume';
 import { performReplacements } from './eng/prompt-build';
 import { runPlotRound, type PlotRoundMessage, type PlotRoundOutcome, type SettledResult, type TaskLogInfo, type TaskProgressInfo } from './eng/engine';
-import { normalizeRound, selectTasksForRound, type ScheduleReason } from './eng/schedule';
+import { selectTasksForFloor, type ScheduleReason } from './eng/schedule';
 import { buildTagMap, type TagMap } from './eng/tags';
 import { applyTagDiffs, collectKnownTagNames, tagsNeedingFullRefresh } from './eng/tag-diff';
 import type { PlotTask } from './eng/task-model';
+import type { PlotApiReply } from './eng/task-accept';
 import type { StashWorking } from './stash-model';
+import type { TavernPromptMacroSource } from '../tavern';
 
 /** 调用方注入进来的取数口。全部可选 —— 缺哪个就当那个占位符是空的。 */
 export interface PlotRoundDeps {
   /** 预设对象（`getPlotPresetDetails()` 的返回）；缺了就没法跑 */
   preset?: Record<string, unknown> | null;
-  /** 建默认提示词组的构造器（产品层决定默认文案） */
-  buildDefaultPromptGroup?: ImportPresetOptions['buildDefaultPromptGroup'];
+  /** 预设导入的兜底项（`$7 默认上下文`的全局值）；预览与真跑必须递同一份。 */
+  importOptions?: ImportPresetOptions;
   /** 任务提示词里要替换的东西（`$U` / `$C` / `$8` 等） */
   replacements?: RoundReplacementsInput;
   /** `$1` 世界书内容（含信封的裸文本由 prompt-build 负责套壳） */
@@ -38,26 +40,33 @@ export interface PlotRoundDeps {
   taskWorldbook?: (task: PlotTask) => string | undefined;
   /** 上一轮剧情（`$6`）；按任务不同可以给不同的值 */
   previousPlot?: string;
+  /**
+   * 暂存区账本里的上一轮标签投影 —— `{{标签}}` 的主来源（用户 2026-11-06 口径）。
+   * 不传（qrf 模式 / 对照测试）时退回 `previousPlot` 建表，行为与旧版一致。
+   */
+  stashHistoryTags?: Map<string, string[]> | null;
   /** 续跑用的暂存快照 */
   working?: StashWorking | null;
   /**
-   * 这是第几轮（按用户楼层计，从 1 开始）。缺省 1。
+   * 每个任务距上一次带自己锚点的用户楼层隔了几条（见 `plot/floor-anchor.ts`）。
+   * 返回 null = 现存楼层里找不到锚点，判为「第一次跑」。缺省时所有任务都按第一次处理。
    *
-   * 只给「按任务设触发轮次」用（`eng/schedule.ts`）：`everyRounds > 1` 的任务
-   * 要靠它判断到期没有。上游没有这个概念，缺省值 1 让所有任务都按「每轮」跑，
-   * 行为与上游一致。
+   * 锚点记在楼层自己的 extra 里，不在预设、也不在脚本设置的账本里：
+   * 删层重刷时锚点跟着楼层一起消失，换聊天自动各算各的。
    */
-  round?: number;
+  gapOf?: (taskId: string) => number | null;
   /**
-   * 某个任务上次在第几轮跑过。返回 `undefined` = 没记过（当第一次，跑）。
-   *
-   * 为什么不直接读任务对象上的 `schedule.lastRound`：账是运行时的，预设是用户的配置文件，
-   * 混在一起会让导出的 JSON 带着「我跑到第几轮了」。账本在 `PlotSettings.taskRuns` 里，
-   * 由调用方按 `预设名::任务id` 查（见 `plot/round-book.ts`）。
+   * 酒馆原生宏替换（`<user>` / `{{user}}` / `<char>` / `{{char}}` 等）。
+   * 在任务 messages 和最终注入指令拼好之后调用；不传 = 不处理（纯函数测试保持原样）。
    */
-  lastRoundOf?: (taskId: string) => number | undefined;
-  /** 调 AI 的口子 */
-  callApi: (messages: PlotRoundMessage[], task: PlotTask, attemptIndex: number) => Promise<string>;
+  macroReplace?: (text: string) => string;
+  /**
+   * 完整提示词模板链（酒馆正则 + ST 宏 + MacroLike → EJS → 再跑一遍宏）。
+   * 传了它时任务消息走异步渲染；最终注入模板也走同一套。
+   */
+  templateProcess?: (text: string, source: TavernPromptMacroSource) => Promise<string>;
+  /** 调 AI 的口子（正文 + 可选推理内容） */
+  callApi: (messages: PlotRoundMessage[], task: PlotTask, attemptIndex: number) => Promise<string | PlotApiReply>;
   /** 中止信号 */
   checkAbort?: () => void;
   /** 判定「用户主动中止」：命中就立刻停下，不做重试（见 `eng/call-outcome.ts`） */
@@ -94,12 +103,12 @@ export type PlotRoundRunOutcome =
       skippedTaskIds: string[];
       /** 本轮真正发出请求的任务（成功的那批）；账本按它记「上次跑过」。 */
       ranTaskIds: string[];
-      /** 本轮因为「触发轮次还没到 / 被停用」而跳过的任务，带上原因（面板/日志用）。 */
+      /** 本轮因为「楼层间隔还没到 / 被停用」而跳过的任务，带上原因（面板/日志用）。 */
       skippedBySchedule: { taskId: string; reason: ScheduleReason }[];
       /** 提示词块全关掉、发不出任何内容的任务（这些不请求 AI）。 */
       skippedNoPrompt: string[];
     }
-  | { ok: false; reason: 'no-preset' | 'aborted-by-stage-failure'; presetName: string; outcome?: PlotRoundOutcome };
+  | { ok: false; reason: 'no-preset' | 'unsupported-legacy-preset' | 'aborted-by-stage-failure'; presetName: string; outcome?: PlotRoundOutcome };
 
 /**
  * 跑一轮。
@@ -114,24 +123,25 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
     return { ok: false, reason: 'no-preset', presetName: '' };
   }
 
-  const config: PlotPresetConfig = importPresetConfig(deps.preset, {
-    buildDefaultPromptGroup: deps.buildDefaultPromptGroup,
-  });
+  const config: PlotPresetConfig = importPresetConfig(deps.preset, deps.importOptions);
+
+  // 老格式预设（没有任务表）：以前会拼一条兜底任务、最后「整轮不发请求也不报错」。
+  // 现在显式挡在入口，交给调用方把原因显示给用户。
+  if (config.tasks.length === 0) {
+    return { ok: false, reason: 'unsupported-legacy-preset', presetName: config.name };
+  }
 
   // 续跑：把已完成的任务摘出去，并把它们的标签带回起点
   const resume = buildResumePlan(config.tasks, deps.working ?? null);
 
-  // ── 触发轮次：这一轮哪些任务到期 ──
+  // ── 触发间隔：这条用户楼层哪些任务到期 ──
   //
   // 放在续跑**之后**：续跑摘掉的是「这一轮不用再跑」的任务，剩下的是候选；
   // 再按周期筛一遍，才是这一轮真正要发请求的。
-  // 顺序反过来的话，一个「每 3 轮」的任务会被续跑先摘掉，账本记成跑过 —— 它会越拖越久。
+  // 顺序反过来的话，一个「每 3 条用户楼层」的任务会被续跑先摘掉、被记成跑过 —— 它会越拖越久。
   //
-  // 账本（上次跑过第几轮）不在任务对象上，由调用方按 `预设名::任务id` 查好了递进来，
-  // 这里只负责覆盖上去。见 `plot/round-book.ts` 里为什么不把账写进预设。
-  const round = normalizeRound(deps.round ?? 1);
-  const candidates = resume.tasks.map(task => withLedgerLastRound(task, deps.lastRoundOf));
-  const selection = selectTasksForRound(candidates, round);
+  // 间隔由调用方从现存楼层里数好递进来（锚点在楼层 extra 里），这里只做纯策略判断。
+  const selection = selectTasksForFloor(resume.tasks, deps.gapOf ?? (() => null));
   const scheduledTasks = selection.due;
   const skippedBySchedule = selection.skipped.map(item => ({ taskId: item.id, reason: item.decision.reason }));
 
@@ -156,8 +166,13 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
   // `character_info` 里的 `character_archive` 也能单独取到。
   const knownTagNames = collectKnownTagNames(config.tasks, config.directiveTemplate);
   const historyTagMap = buildTagMap(String(deps.previousPlot ?? ''), null, knownTagNames);
+  // `{{标签}}` 看暂存区账本：账本按标签存着上一轮的投影，父标签内容本来就带着子标签。
+  // 上一楼层正文只作补充 —— 它存的是原始回传，升级模式下成果根本在账本里、楼层没有。
+  if (deps.stashHistoryTags instanceof Map) {
+    deps.stashHistoryTags.forEach((value, name) => historyTagMap.set(name, value));
+  }
 
-  const renderMessages = (task: PlotTask, relayTagMap?: TagMap): PlotRoundMessage[] => {
+  const renderMessages = async (task: PlotTask, relayTagMap?: TagMap): Promise<PlotRoundMessage[]> => {
     const context: TaskRenderContext = {
       replacements: baseReplacements,
       // `$1` 走信封，`performReplacements` 只认 `worldbookContent` 这个位置，
@@ -169,8 +184,10 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
       // 阶段接力：引擎每一步都会递进来「本阶段开始那一刻」的标签快照；
       // 没递（比如算提示词条数那一次）就退到续跑起点。
       relayTagMap: relayTagMap ?? resume.relayTagMap,
+      macroReplace: deps.macroReplace ?? null,
+      templateProcess: deps.templateProcess ?? null,
     };
-    const messages = renderTaskMessages(task, context);
+    const messages = await renderTaskMessagesAsync(task, context);
 
     // 旧格式保底：上一轮某个差量标签还是表格、这一轮已改成块（或反过来），
     // 先提醒 AI 本轮必须输出完整内容；合并端也会按「全量替换」处理。
@@ -193,10 +210,18 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
   //
   // 与任务提示词共用同一张占位符表：`$1` / `$9` 走信封，其余平铺，顺序由
   // `performReplacements` 自己保证，不在这里另起一套。
-  const directiveTemplate = performReplacements(config.directiveTemplate, {
+  const rawDirectiveTemplate = performReplacements(config.directiveTemplate, {
     replacements: baseReplacements,
     worldbookContent: deps.worldbookContent,
   });
+  // 最终注入模板里的 `{{user}}` / `{{char}}` 也是酒馆宏；必须在 buildFinalMessage
+  // 把它当内部标签占位符清掉之前替换，否则会被换成空串。装了 EJS 时同样走完整链。
+  // 与任务提示词同一口径：固定「斜杠命令」作用域，不套用户 / AI 输出正则。
+  const directiveTemplate = deps.templateProcess
+    ? await deps.templateProcess(rawDirectiveTemplate, 'slash_command')
+    : deps.macroReplace
+      ? deps.macroReplace(rawDirectiveTemplate)
+      : rawDirectiveTemplate;
 
   // ── 提示词全关掉的任务不请求 AI ──
   //
@@ -207,7 +232,7 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
   // 只渲一次，顺手把条数记下来：`renderTaskMessages` 里有一整套占位符替换，
   // 为了判空再跑一遍不值当。
   const messageCounts = new Map<string, number>();
-  for (const task of scheduledTasks) messageCounts.set(task.id, renderMessages(task).length);
+  for (const task of scheduledTasks) messageCounts.set(task.id, (await renderMessages(task)).length);
   const runnableTasks = scheduledTasks.filter(task => (messageCounts.get(task.id) ?? 0) > 0);
   const skippedNoPrompt = scheduledTasks
     .filter(task => (messageCounts.get(task.id) ?? 0) === 0)
@@ -223,13 +248,18 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
     // 标签级差量：AI 回传的只是变化补丁，先按上一轮标签投影合并成完整回传，
     // 再交给原来的验收/聚合/落盘链。没有开启任何差量标签时原样返回。
     callApi: async (messages, task, attemptIndex) => {
-      const raw = await deps.callApi(messages, task, attemptIndex);
-      return applyTagDiffs({
-        rawResponse: raw,
-        task,
-        modes: config.tagDiffModes,
-        previousTags: historyTagMap,
-      });
+      const reply = await deps.callApi(messages, task, attemptIndex);
+      const text = typeof reply === 'string' ? reply : reply.text;
+      const reasoning = typeof reply === 'string' ? '' : reply.reasoning;
+      return {
+        text: applyTagDiffs({
+          rawResponse: text,
+          task,
+          modes: config.tagDiffModes,
+          previousTags: historyTagMap,
+        }),
+        reasoning,
+      };
     },
     checkAbort: deps.checkAbort,
     isAbort: deps.isAbort,
@@ -250,35 +280,23 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
     };
   }
 
+  // 最终注入指令里可能写着酒馆宏（比如 `<user>` / `{{char}}`）。任务消息在
+  // `renderTaskMessages` 里已经替换过；最终注入是引擎在全部任务跑完后才拼的，
+  // 这里补一次，保证写进楼层的正文也拿到真实用户名/角色名。
+  const finalMessage = deps.macroReplace ? deps.macroReplace(outcome.injectedMessage) : outcome.injectedMessage;
+
   return {
     ok: true,
     presetName: config.name,
     outcome,
-    finalMessage: outcome.injectedMessage,
+    finalMessage,
     saveContent: outcome.saveContent,
     skippedTaskIds: resume.skippedTaskIds,
-    // 只有**真发出请求**的任务才记「这轮跑过」：失败的下轮要重试，
-    // 但这一轮它已经占了一次调用，不该在「每 N 轮」上再记一次便宜。
+    // 只有**真发出请求**的任务才记「这条楼层跑过」：失败的下轮要重试，
+    // 但这一轮它已经占了一次调用，不该在「每 N 条用户楼层」上再记一次便宜。
     ranTaskIds: outcome.taskResults.map(result => result.taskId),
     skippedBySchedule,
     skippedNoPrompt,
   };
 }
 
-/**
- * 把账本里的「上次跑过第几轮」盖到任务的 `schedule.lastRound` 上。
- *
- * 账本值优先于预设里可能残留的 `lastRound`：预设是用户导来导去的文件，
- * 里面写着的轮号只可能是别人机器上的，或者上一次导出的旧账 —— 以本机账本为准。
- * 账本没有记录（`undefined`）时**不动**任务，让它保持「第一次跑」的判定。
- */
-function withLedgerLastRound(
-  task: PlotTask,
-  lastRoundOf?: (taskId: string) => number | undefined,
-): PlotTask {
-  const last = lastRoundOf?.(task.id);
-  if (last === undefined) return task;
-  const at = Math.floor(Number(last));
-  if (!Number.isFinite(at) || at < 1) return task;
-  return { ...task, schedule: { ...(task.schedule || {}), lastRound: at } };
-}

@@ -18,6 +18,7 @@
  * 这一层是纯函数：不读聊天变量、不碰酒馆，输入输出都是对象，方便对着测。
  */
 
+import { isPlainObject } from './guards';
 import { ENTRY_MAX, trimEntries, type Stash, type StashEntry, type StashOrphan } from './stash-model';
 
 /** 文件头的标记，用来挡住「随便拿个 JSON 当暂存区导入」。 */
@@ -119,7 +120,7 @@ export function parseStashPort(text: string): ParseOutcome {
   }
   // 数组也是 `typeof 'object'`，得单独挡掉：`[1,2,3]` 会被说成「不是暂存区文件」，
   // 而它真正的问题是顶层就不是一条记录。
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+  if (!isPlainObject(parsed)) {
     return { ok: false, error: '文件内容不是一个对象' };
   }
 
@@ -202,6 +203,10 @@ function normalizeLanding(value: unknown): StashEntry['landings'][number] | null
     presetName: typeof record.presetName === 'string' ? record.presetName : '',
     taskRaw,
     taskTags: record.taskTags && typeof record.taskTags === 'object' ? (record.taskTags as StashEntry['landings'][number]['taskTags']) : undefined,
+    // 「本该进正文」的标签清单：不带上，换设备导入后会把只存档的标签误判成缺口
+    textTagNames: Array.isArray(record.textTagNames)
+      ? record.textTagNames.filter((name): name is string => typeof name === 'string' && name !== '')
+      : undefined,
     complete: record.complete !== false,
     seq: typeof record.seq === 'number' ? record.seq : undefined,
   };

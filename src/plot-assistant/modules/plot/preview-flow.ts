@@ -1,7 +1,7 @@
 /**
  * plot/preview-flow.ts — 「这一次到底会发给 AI 什么」的只读预演
  *
- * 为什么要有它：面板上看到的永远是**模板**（`$8`、`$1`、`{{zhaohui}}` 原样写着），
+ * 为什么要有它：面板上看到的永远是**模板**（`$8`、`$1` 原样写着），
  * 而用户真正想确认的是「点这一次发送，AI 收到的到底是一段什么字」。
  * 以前的「最终注入指令预览」只把模板贴出来，占位符一个都没换，等于没预览。
  *
@@ -27,20 +27,24 @@ import { describePresetProblem, readPlotPreset } from './data/acu-presets';
 import { buildSummaryIndexText, readAcuTables } from './data/read-tables';
 import { pickSummaryIndexEntry } from './eng/data-format';
 import { importPresetConfig } from './eng/preset-import';
+import { applyContextTagFilters } from './eng/context-tags';
+import { buildResumePlan } from './eng/resume';
 import type { PlotRoundMessage } from './eng/engine';
 import { buildHistoryDigest, pickHistoryMessages } from './eng/history';
 import { getPlotFromHistory } from './eng/history-plot';
-import { renderTaskMessages } from './eng/messages';
+import { renderTaskMessagesAsync } from './eng/messages';
 import { buildRoundReplacements } from './eng/round-inputs';
-import { normalizeRound, selectTasksForRound } from './eng/schedule';
+import { selectTasksForFloor } from './eng/schedule';
+import { anchorNameOf, readAnchorGap, type AnchorFloor } from './floor-anchor';
 import { buildTagMap } from './eng/tags';
-import { collectKnownTagNames } from './eng/tag-diff';
+import { collectKnownTagNames, tagsNeedingFullRefresh } from './eng/tag-diff';
 import { buildPlotWorldbookTexts } from './data/worldbook-hits';
 import { resolveChatStateStore } from './data/chat-vars';
 import { resolveChatKey } from './chat-key';
-import { attachLandingsToChat } from './stash-model';
-import { readPresetPlaceholders } from './preset-edit';
-import { readWorldbookEntries } from './run-in-flow';
+import { attachLandingsToChat, collectStashTagMap } from './stash-model';
+import { readWorldbookEntries, toPlotMessage } from './run-in-flow';
+import { processTavernTemplateText, readRoundIdentity, substituteTavernMacros } from '../tavern';
+import { presetImportOptions } from './preset-options';
 
 /** 一条要发出去的 message（role 已归一化）。 */
 export interface PlotPreviewMessage {
@@ -62,21 +66,11 @@ export interface PlotPreview {
   presetName: string;
   round: number;
   tasks: PlotPreviewTask[];
-  /** 这一轮按轮次规则被跳过、或被跳过原因说明的任务。 */
+  /** 这次发送按楼层间隔被跳过、或被跳过原因说明的任务。 */
   skipped: { taskId: string; reason: string }[];
 }
 
 export type PlotPreviewResult = { ok: true; preview: PlotPreview } | { ok: false; note: string };
-
-/** 聊天楼层 → 渲染层认识的样子（`mes` + `is_user`，其余键平铺）。 */
-function toPlotMessageFrom(raw: Record<string, unknown>): Record<string, unknown> {
-  const extra = (raw as { extra?: Record<string, unknown> }).extra;
-  return {
-    ...(extra ?? {}),
-    is_user: raw.role === 'user',
-    mes: raw.message,
-  };
-}
 
 /**
  * 预演一轮剧情推进。
@@ -99,22 +93,41 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
     preset = outcome.details as Record<string, unknown>;
   }
 
-  const config = importPresetConfig(preset);
-  const round = normalizeRound(plotSettings.roundIndex + 1);
-  const placeholders = readPresetPlaceholders(preset);
-  const historyLimit = Math.max(1, config.contextTurnCount);
+  const config = importPresetConfig(preset, presetImportOptions(plotSettings));
+  const historyLimit = Math.max(0, config.contextTurnCount);
+  const presetKey = stored ? stored.name : config.name;
 
   const rawChat = getChatMessages('0-{{lastMessageId}}') as unknown as Record<string, unknown>[];
-  const chat = rawChat.map(toPlotMessageFrom);
+  const chat = rawChat.map(toPlotMessage);
+  // 触发间隔和真跑用同一套口径：数现存的第几条用户楼层，从新往旧找每个任务自己的锚点。
+  const anchorFloors = rawChat as unknown as AnchorFloor[];
+  const taskAnchorNames = new Map<string, string>(
+    config.tasks.map(task => [task.id, anchorNameOf(presetKey, task.id)]),
+  );
+  const gapOf = (taskId: string): number | null =>
+    readAnchorGap(anchorFloors, taskAnchorNames.get(taskId) ?? '');
+  // 预览这一栏显示的是判定用的「第几条用户楼层」，不是绝对楼层号；日志才按绝对楼层号标识。
+  const round = anchorFloors.filter((item) => item?.role === 'user').length + 1;
   // 升级模式的上一轮成果在账本里、不在楼层字段上：和真跑那条链一样先贴回去，
   // 否则"预览这次会发什么"里的 `$6` 会是空的，预览与实跑对不上。
   const useStash = plotSettings.stashMode !== 'qrf';
   const stash = useStash ? resolveChatStateStore().loadStash(resolveChatKey(ctx.state.chatKey)).stash : null;
   const historyChat = stash ? attachLandingsToChat(chat, rawChat as never, stash, config.name) : chat;
-  const historyDigest = buildHistoryDigest(pickHistoryMessages(chat as never, userText, historyLimit));
+  const hasTagRules = config.extractRules.length > 0 || config.excludeRules.length > 0;
+  const historyDigest = buildHistoryDigest(
+    pickHistoryMessages(
+      chat as never,
+      historyLimit,
+      (content) =>
+        applyContextTagFilters(String(content ?? ''), {
+          extractRules: config.extractRules,
+          excludeRules: config.excludeRules,
+        }),
+      hasTagRules,
+    ),
+  );
   const previousPlot = getPlotFromHistory(historyChat as never, {}, config.name);
-  const recentText = rawChat
-    .slice(-historyLimit)
+  const recentText = (historyLimit === 0 ? [] : rawChat.slice(-historyLimit))
     .map((item) => String(item.message ?? ''))
     .join('\n');
 
@@ -139,38 +152,49 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
     enabledEntries: plotSettings.worldbookEntries,
   });
 
+  const identity = readRoundIdentity();
   const replacements = buildRoundReplacements({
+    ...identity,
     worldbookContent: worldbook.content,
     worldbookDatabaseExcluded: worldbook.contentExcludingDatabase,
     summaryIndex,
     historyDigest,
     previousPlot,
     userInput: userText,
-    strengths: {
-      sulv1: placeholders.sulv1,
-      sulv2: placeholders.sulv2,
-      sulv3: placeholders.sulv3,
-      sulv4: placeholders.sulv4,
-    },
-    zhaohui: placeholders.zhaohui,
   });
 
   const enabled = config.tasks.filter((task) => task.enabled !== false);
-  const selection = selectTasksForRound(enabled, round);
+  const selection = selectTasksForFloor(enabled, gapOf);
   // ── 历史标签表：上一轮 `<plot>` 里的 `<标签>内容</标签>` ──
   //
   // 与真跑路径（`round.ts`）同一张表：`{{标签}}` 查不到就吐 `<标签></标签>` 空壳，
   // 而且不报错。预览必须跟真跑对得上，否则用户照着预览放行，实际发出去却是空标签。
   const knownTagNames = collectKnownTagNames(config.tasks, config.directiveTemplate);
   const historyTagMap = buildTagMap(String(previousPlot ?? ''), null, knownTagNames);
+  // 与真跑（round.ts）同一口径：{{标签}} 优先看暂存区账本里的上一轮标签投影。
+  if (stash) collectStashTagMap(stash).forEach((value, name) => historyTagMap.set(name, value));
+  // 预览只读、不算续跑：`null` 起点给出的快照就是真跑「全新一轮」的那张接力表。
+  const relayTagMap = buildResumePlan(config.tasks, null).relayTagMap;
   const tasks: PlotPreviewTask[] = [];
   for (const task of selection.due) {
-    const messages: PlotRoundMessage[] = renderTaskMessages(task, {
+    const messages: PlotRoundMessage[] = await renderTaskMessagesAsync(task, {
       replacements,
       worldbookContent: worldbook.content,
-      relayTagMap: null,
+      relayTagMap,
       historyTagMap,
+      // 预览要和真跑一致：宏与 EJS 也在发送前处理掉，否则用户看到的是 `{{char}}` 字面量。
+      macroReplace: substituteTavernMacros,
+      templateProcess: processTavernTemplateText,
     });
+    // 与真跑 `round.ts` 同一条差量格式提醒：上一轮标签格式和本轮模式对不上时，
+    // 预览里也要看得见这句 system，否则用户照着预览放行、实际请求却多一条。
+    const refreshTags = tagsNeedingFullRefresh(task, config.tagDiffModes, historyTagMap);
+    if (refreshTags.length > 0) {
+      messages.push({
+        role: 'system',
+        content: `【差量格式提醒】上一轮的这些标签不是当前模式要求的格式：${refreshTags.join('、')}。本轮必须输出这些标签的完整内容（不要只写变化块，也不要写【无变化】），否则旧格式会被整份替换。`,
+      });
+    }
     tasks.push({
       taskId: task.id,
       taskName: task.name || task.id,
@@ -183,7 +207,7 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
   return {
     ok: true,
     preview: {
-      presetName: stored ? stored.name : config.name,
+      presetName: presetKey,
       round,
       tasks,
       skipped: selection.skipped.map((item) => ({ taskId: item.id, reason: String(item.decision.reason) })),

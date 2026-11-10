@@ -4,19 +4,27 @@
  * - runRerushFlow：全流程重刷 / 回填修改
  *   取文：默认取最新用户楼层；开了「AI楼层模式」则换成它上方的最近一条 AI 楼层。
  *         按设置里的顺序级联尝试捕获预设，首个成功的生效
- *   删层：不论取文来自哪一层，都从最新用户楼层一直删到末尾，
- *         优先走酒馆的增量删除（不重载整个对话）
- *   发送：删完立刻真实点击发送按钮（走完整 DOM 事件，卡片的发送意图钩子才看得见），中间不经过任何定时器
+ *   填框与删层：先把原文放回输入框，再从最新用户楼层一直删到末尾
+ *         （优先走酒馆的增量删除，不重载整个对话）
+ *   推进：全流程重刷在删完层之后才跑剧情推进，跑完把最终指令放回输入框；
+ *         回填修改一个 AI 请求都不发
+ *   发送：删完、推进成功后立刻真实点击发送按钮（走完整 DOM 事件，卡片的发送意图钩子才看得见），中间不经过任何定时器
  */
+import {
+  NATIVE_SETTLE_MS,
+  TOAST_BRIEF_MS,
+  TOAST_NORMAL_MS,
+  TOAST_NOTICE_MS,
+  TOAST_DETAIL_MS,
+  TOAST_URGENT_MS,
+} from './constants';
 import { pageQuery, pageToastr, tavernGlobal, stContext, aiIsStreaming, historyEditOpen, hasDraft, parentWindow } from './tavern';
 import { flashRejected, releaseLock } from './feedback';
 import { findScriptButton } from './script-button';
 import { latestAiFloorBefore, locateLatestUserFloor } from './safety';
 import { captureWithPresets } from './regex';
-import { profile } from './profile';
 import { logInfo, logWarn } from './logger';
 import { MSG, TAG } from './copy';
-import { NATIVE_SETTLE_MS } from './constants';
 import { appendPlotBlock } from './plot/run-in-flow';
 import type { PlotAppendResult } from './plot/run-in-flow';
 import { mountBubble } from './plot/send-gate';
@@ -32,7 +40,6 @@ function isRegenerateLabel(text: string): boolean {
 
 /**
  * 原生重刷：三条路径按可靠性从高到低依次尝试。
- * 返回是否真的把重刷下达出去了。
  */
 export async function runNativeRefresh(ctx: RerushContext): Promise<boolean> {
   const p$ = pageQuery();
@@ -52,7 +59,6 @@ export async function runNativeRefresh(ctx: RerushContext): Promise<boolean> {
   if (hasDraft()) return refuse(MSG.blockedByNotEmptyBox);
   if (aiIsStreaming()) return refuse(MSG.blockedWhileGenerating);
 
-  // 换插头放在闸门之后：被拦下的一轮不应该白换一次插头
 
   let triggered = false;
 
@@ -164,7 +170,7 @@ function issueSend(): SendPath {
 }
 
 /** autoSend 为真走全流程重刷，为假走回填修改。 */
-export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Promise<void> {
+async function runRerushFlowCore(ctx: RerushContext, autoSend: boolean): Promise<void> {
   const toast = pageToastr();
   const $btn = findScriptButton();
   const { toast: wantToast } = ctx.settings.look;
@@ -183,7 +189,7 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
   const presets = ctx.settings.presets;
   if (presets.length === 0) {
     logInfo(TAG.gate, MSG.blockedNoPreset);
-    if (wantToast) toast?.error(MSG.toastNoPreset, '', { timeOut: 5000 });
+    if (wantToast) toast?.error(MSG.toastNoPreset, '', { timeOut: TOAST_NORMAL_MS });
     flashRejected(ctx, $btn ?? undefined);
     if ($btn) releaseLock(ctx, $btn);
     return;
@@ -196,7 +202,7 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
   const captureFloor = fromAiFloor ? latestAiFloorBefore(target.messageId) : target;
   if (!captureFloor) {
     logInfo(TAG.grab, MSG.blockedNoAiFloor);
-    if (wantToast) toast?.error(MSG.toastNoAiFloor, '', { timeOut: 6000 });
+    if (wantToast) toast?.error(MSG.toastNoAiFloor, '', { timeOut: TOAST_NOTICE_MS });
     flashRejected(ctx, $btn ?? undefined);
     if ($btn) releaseLock(ctx, $btn);
     return;
@@ -212,7 +218,7 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
   const captured = captureWithPresets(captureFloor.message.message, presets);
   if (!captured) {
     logInfo(TAG.grab, MSG.cascadeEveryMiss(presets.length));
-    if (wantToast) toast?.error(MSG.toastCascadeMiss(presets.length), '', { timeOut: 6000 });
+    if (wantToast) toast?.error(MSG.toastCascadeMiss(presets.length), '', { timeOut: TOAST_NOTICE_MS });
     flashRejected(ctx, $btn ?? undefined);
     if ($btn) releaseLock(ctx, $btn);
     return;
@@ -220,6 +226,17 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
 
   try {
     logInfo(TAG.grab, MSG.captured(captured.order, captured.preset.name, captured.text));
+
+    // 删层是两条路共用的第一步：全流程重刷要「先清尾、再跑推进」（用户 2026-11-09 口径），
+    // 回填修改本来就是「捞原文→填框→删层」。抽成一个小函数，免得两边各写一遍走岔。
+    const clearTail = async (): Promise<void> => {
+      const ids = floorRangeToDelete(target.messageId);
+      const tailFloor = ids[ids.length - 1];
+      logInfo(TAG.del, MSG.deleteRange(target.messageId, tailFloor, ids.length));
+      if (wantToast) toast?.warning(MSG.toastDeleteRange(target.messageId, tailFloor, ids.length), '', { timeOut: TOAST_BRIEF_MS });
+      const deletedBy = await deleteFloorsToTail(ids);
+      logInfo(TAG.del, MSG.deleted(deletedBy));
+    };
 
     // 回填修改只做「捞原文 → 填框 → 删层」，一个 AI 请求都不发。
     // 长按的语义是把刚才那段话捞回来改，推进等他改完发出去时自然会跑；
@@ -234,31 +251,46 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
       // $8 进了这一轮的输入，再拼一遍就是同一段话读两遍（用户 2026-11-03 报的
       // 「最终注入之前又注入一次原文」）。send-gate 那条路一直传的是 final，这里漏了。
       //
+      // 顺序（用户 2026-11-09 明确）：先把原文放回输入框、把最新用户楼层及其之后的楼层删掉，
+      // 再开始跑推进。三连击之后应该立刻看到「文本回来了、楼层清了」，而不是先冒一个跑
+      // 十几秒的气泡、失败了楼层还赖在那里。删完再填一次：增量删除若触发了整段重载，
+      // 输入框可能被一起重画。
+      putIntoInputBox(captured.text);
+      await clearTail();
+      putIntoInputBox(captured.text);
+
       // 这几轮 AI 请求要跑十几秒，只把按钮变灰的话用户分不清"在跑"和"卡死了"，
       // 所以挂一条和发送拦截同款的进度气泡，上面的「终止」能中断这一轮。
       const doc: Document = parentWindow().document ?? document;
       const bubble = mountBubble(doc, () => abort.abort());
       plotResult = await appendPlotBlock(ctx, captured.text, {
-        floor: { messageId: target.messageId, floorText: target.message.message },
+        // 锚点的正文用 captured.text，不用旧楼层的完整 message：旧楼层已经删了，
+        // 下一次真正建出来的是「输入框里这段」；失败后续跑要靠它认出同一段输入。
+        floor: { messageId: target.messageId, floorText: captured.text },
         join: 'final',
         signal: abort.signal,
         // 跟发送拦截那条路一样，把「第几个任务 / 叫什么」喂给气泡
         onTaskStart: (info) => bubble.setProgress(info),
+        onTaskSettled: (result) => {
+          if (result?.taskId) bubble.settleTask(result.taskId, result.success === true);
+        },
       }).finally(() => bubble.close());
 
       // 跑这几秒里用户可能已经换了聊天：target.messageId 指的是上一个聊天里的楼层，
-      // 再往下走会把上一轮的最终指令注进新聊天、还会删掉新聊天的楼层。
+      // 再往下走会把上一轮的最终指令注进新聊天。旧聊天的楼层已经按重刷流程删掉了，
+      // 这里只能停手；输入框里的原文已经放回去了。
       if (resolveChatKey(ctx.state.chatKey) !== startedChatKey) {
         logWarn(TAG.post, MSG.plotChatSwitched);
-        if (wantToast) toast?.warning(MSG.plotChatSwitched, '', { timeOut: 8000 });
+        if (wantToast) toast?.warning(MSG.plotChatSwitched, '', { timeOut: TOAST_URGENT_MS });
         if ($btn) releaseLock(ctx, $btn);
         return;
       }
 
-      // 用户按了气泡上的「终止」：停在原地，不写输入框、不删楼层、不发送
+      // 用户按了气泡上的「终止」：原文已经在输入框里、旧楼层已经按重刷流程删掉，
+      // 这一轮不再发送。
       if (abort.signal.aborted) {
         logInfo(TAG.action, MSG.plotStoppedByUser);
-        if (wantToast) toast?.warning(MSG.plotStoppedByUser, '', { timeOut: 6000 });
+        if (wantToast) toast?.warning(MSG.plotStoppedByUser, '', { timeOut: TOAST_NOTICE_MS });
         if ($btn) releaseLock(ctx, $btn);
         return;
       }
@@ -268,17 +300,18 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
           // 失败也要留一行日志：只弹 toast 的话，等用户回头翻「运行日志」会发现一片干净，
           // 看不出这一轮到底跑没跑、为什么没成。
           logWarn(TAG.grab, `剧情推进未完成：${plotResult.note}`);
-          if (wantToast) toast?.warning(`剧情推进未完成：${plotResult.note}`, '', { timeOut: 5000 });
+          if (wantToast) toast?.warning(`剧情推进未完成：${plotResult.note}`, '', { timeOut: TOAST_NORMAL_MS });
         }
       }
 
-      // 跑过但没跑完：停在原地。不删楼层、不发送 —— 这一层还留着，下次点发送才能认出
-      // 「同一层、同一段话、还欠几个任务」，接着跑（`plot/stash-flow.ts`）。
-      // 原文放回输入框，用户想放弃推进只需要关掉开关再发。
+      // 跑过但没跑完：原文已经在输入框里、旧楼层已经删了，这一轮不发送。
+      // 下次点发送时，发送拦截会锚在「最后一层 + 1」（也就是刚才删掉的那一层），
+      // 暂存账按同一段输入认出这次进度，接着跑还欠的任务（`plot/stash-flow.ts`）。
+      // 用户想放弃推进只需要关掉开关再发。
       if (plotResult.blocking) {
         putIntoInputBox(plotResult.text);
         logWarn(TAG.post, `已停在原地：${plotResult.note}`);
-        if (wantToast) toast?.warning(`剧情推进没跑完，已停在原地；再点一次会接着跑`, '', { timeOut: 8000 });
+        if (wantToast) toast?.warning(`剧情推进没跑完，原文已放回输入框；再点发送会接着跑`, '', { timeOut: TOAST_URGENT_MS });
         if ($btn) releaseLock(ctx, $btn);
         return;
       }
@@ -287,15 +320,12 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
     // 回填修改没有推进结果，填回去的就是正则从楼层里捞出来的原文
     putIntoInputBox(plotResult ? plotResult.text : captured.text);
 
-    // 只有真要发请求时才换插头：全流程重刷会替用户按下发送，回填修改不发
-
-    const ids = floorRangeToDelete(target.messageId);
-    const tailFloor = ids[ids.length - 1];
-    logInfo(TAG.del, MSG.deleteRange(target.messageId, tailFloor, ids.length));
-    if (wantToast) toast?.warning(MSG.toastDeleteRange(target.messageId, tailFloor, ids.length), '', { timeOut: 4000 });
-
-    const deletedBy = await deleteFloorsToTail(ids);
-    logInfo(TAG.del, MSG.deleted(deletedBy));
+    // 全流程重刷已经在跑推进之前删过了；回填修改走到这里才删。
+    if (!autoSend) {
+      await clearTail();
+      // 删层若触发整段重载，输入框可能被一起重画；删完再填一次。
+      putIntoInputBox(captured.text);
+    }
 
     if (autoSend) {
       // 这一次是我们自己发的：给拦截器打个招呼，否则它会把这一下当成用户新发的一条、
@@ -305,9 +335,9 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
       const sentBy = issueSend();
       logInfo(TAG.post, MSG.sendCommandIssued(sentBy));
       if (sentBy === '落空') {
-        if (wantToast) toast?.error(MSG.toastSendMissed, '', { timeOut: 8000 });
+        if (wantToast) toast?.error(MSG.toastSendMissed, '', { timeOut: TOAST_URGENT_MS });
       } else {
-        if (wantToast) toast?.success(MSG.toastSent, '', { timeOut: 5000 });
+        if (wantToast) toast?.success(MSG.toastSent, '', { timeOut: TOAST_NORMAL_MS });
         // 楼层是酒馆随后建的，所以写回要等它出现。**不 await**：这条链已经结束，
         // 写回失败了也只能记一笔，不能让用户以为消息没发出去。
         const commit = plotResult?.commit;
@@ -324,7 +354,7 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
               if (check.written && check.plotCount === 1) logInfo(TAG.post, `楼层写回完成：${check.note}`);
               else logWarn(TAG.post, `楼层写回异常：${check.note}`);
               if ((!check.written || check.plotCount !== 1) && wantToast) {
-                toast?.warning(`剧情推进写回：${check.note}`, '', { timeOut: 7000 });
+                toast?.warning(`剧情推进写回：${check.note}`, '', { timeOut: TOAST_DETAIL_MS });
               }
             })
             .catch((error) => logWarn(TAG.post, '楼层写回检查失败', error));
@@ -332,7 +362,7 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
       }
     } else {
       logInfo(TAG.action, MSG.filledForManualEdit);
-      if (wantToast) toast?.success(MSG.toastFilled, '', { timeOut: 5000 });
+      if (wantToast) toast?.success(MSG.toastFilled, '', { timeOut: TOAST_NORMAL_MS });
     }
 
     // 立刻解锁：再挂一个定时器解锁的话，页面一转到后台就会被浏览器压住，
@@ -341,14 +371,30 @@ export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Prom
   } catch (e) {
     if (abort.signal.aborted) {
       logInfo(TAG.action, MSG.plotStoppedByUser);
-      if (wantToast) toast?.warning(MSG.plotStoppedByUser, '', { timeOut: 6000 });
+      if (wantToast) toast?.warning(MSG.plotStoppedByUser, '', { timeOut: TOAST_NOTICE_MS });
       if ($btn) releaseLock(ctx, $btn);
       return;
     }
     const reason = e instanceof Error ? e.message : String(e);
     logWarn(TAG.action, MSG.flowAborted(reason), e);
-    if (wantToast) toast?.error(MSG.flowAborted(reason), '', { timeOut: 8000 });
+    if (wantToast) toast?.error(MSG.flowAborted(reason), '', { timeOut: TOAST_URGENT_MS });
     flashRejected(ctx, $btn ?? undefined);
     if ($btn) releaseLock(ctx, $btn);
+  }
+}
+
+/**
+ * 外层兜底：定位楼层、找 AI 楼层、级联捕获这些调用都在原来的 try/catch 之外，
+ * 一旦抛异常（例如捕获组未参与匹配时旧代码对 undefined 调 .trim()），按钮会永久锁死。
+ * 这里用 try/finally 把整条流程包起来，无论正常收场、提前返回还是抛异常都解锁；
+ * 异常继续往外抛，由 router 的 .catch 记日志，不产生未处理 rejection。
+ */
+export async function runRerushFlow(ctx: RerushContext, autoSend: boolean): Promise<void> {
+  try {
+    await runRerushFlowCore(ctx, autoSend);
+  } finally {
+    const $btn = findScriptButton();
+    if ($btn) releaseLock(ctx, $btn);
+    else ctx.state.locked = false;
   }
 }

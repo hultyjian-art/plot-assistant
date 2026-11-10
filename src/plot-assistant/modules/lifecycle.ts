@@ -6,7 +6,7 @@
  */
 import { klona } from 'klona';
 import { ensureMotionCss, ensureWandEntry, mountScriptButton } from './button';
-import { WAND_ENTRY_ID, DIAGNOSTIC_DELAY_MS } from './constants';
+import { WAND_ENTRY_ID, DIAGNOSTIC_DELAY_MS, TOAST_URGENT_MS } from './constants';
 import { mountGestureWatch } from './gesture';
 import { claimInstance, releaseInstance } from './instance';
 import { logInfo, logWarn, logError } from './logger';
@@ -16,11 +16,15 @@ import { loadSettings, FALLBACK_SETTINGS } from './settings';
 import { pageQuery, tavernGlobal, helperGlobal, pageToastr } from './tavern';
 import { MSG, TAG } from './copy';
 import { mountFloorSync } from './plot/floor-sync';
-import type { RerushContext } from './types';
+import { enqueueWorldbookCheck } from './plot/worldbook-write';
+import type { RerushContext, TavernLike } from './types';
 
-/** 装载。 */
+/** 装载：抢占实例位、挂监听、装按钮与手势，退场时回收。 */
 export function bootstrap(ctx: RerushContext): void {
   let torn = false;
+  /** chat_id_changed 的具名回调与它挂靠的事件源：退场时要按同一引用摘掉。 */
+  let chatChangedSource: TavernLike['eventSource'] | null = null;
+  let chatChangedListener: ((chatId: unknown) => void) | null = null;
 
   /** 退场：摘监听、退位、删掉自己留在酒馆页面上的节点。重复调用只生效一次。 */
   const teardown = (): void => {
@@ -28,6 +32,11 @@ export function bootstrap(ctx: RerushContext): void {
     torn = true;
     ctx.state.detachListeners?.();
     ctx.state.detachListeners = undefined;
+    if (chatChangedSource && chatChangedListener) {
+      chatChangedSource.removeListener?.('chat_id_changed', chatChangedListener);
+    }
+    chatChangedSource = null;
+    chatChangedListener = null;
     // 只有"当前在位的还是自己"时才注销，避免把已接管的新实例的登记抹掉
     releaseInstance(getScriptId(), ctx.state.instanceId);
     logInfo(TAG.boot, MSG.teardownDone);
@@ -46,6 +55,9 @@ export function bootstrap(ctx: RerushContext): void {
   const detachPlotGate = mountPlotSendGate(ctx);
   // 用户在酒馆里手动改完楼层、点保存时，把改动同步回当前模式的存储（账本或 qrf 字段）。
   const detachFloorSync = mountFloorSync(ctx);
+  // 世界书写入（2026-11-07 批 36/37）：脚本装载时对一次账 —— 酒馆初始加载时
+  // chat_id_changed 不一定再发一次，靠这里兜住「上次切了聊天/角色卡、改了规则」的场景。
+  enqueueWorldbookCheck(ctx);
   const detachGesture = ctx.state.detachListeners;
   ctx.state.detachListeners = () => {
     detachGesture?.();
@@ -85,18 +97,24 @@ export function bootstrap(ctx: RerushContext): void {
     }
 
     if (somethingWrong) {
-      pageToastr()?.error(MSG.mountPartial, MSG.mountPartialTitle, { timeOut: 8000 });
+      pageToastr()?.error(MSG.mountPartial, MSG.mountPartialTitle, { timeOut: TOAST_URGENT_MS });
     } else {
       logInfo(TAG.check, MSG.mountOk);
     }
   }, DIAGNOSTIC_DELAY_MS);
 
   if (tavern && tavern.eventSource) {
-    tavern.eventSource.on('chat_id_changed', (chatId: unknown) => {
+    chatChangedSource = tavern.eventSource;
+    chatChangedListener = (chatId: unknown): void => {
       const newKey = typeof chatId === 'string' ? chatId : String(chatId);
       logInfo(TAG.boot, MSG.chatSwitched(newKey));
       ctx.state.chatKey = newKey;
-    });
+      // 世界书写入联动（2026-11-07 批 36/37）：换聊天后按新聊天的账本重算 ——
+      // 新聊天账本空，重放为空，角色卡世界书里就不残留上一聊天的条目。
+      // 这只是加速触发：切角色卡没有干净事件，每轮开跑前还会比对一次键。
+      enqueueWorldbookCheck(ctx);
+    };
+    tavern.eventSource.on('chat_id_changed', chatChangedListener);
 
     logInfo(TAG.boot, MSG.eventMounted);
   } else {

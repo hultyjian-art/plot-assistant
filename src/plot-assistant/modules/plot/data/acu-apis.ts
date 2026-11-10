@@ -49,6 +49,9 @@
  *    让面板把话讲清楚，绝不能因为读不到 ACU 就把面板打挂。
  */
 
+import { DEFAULT_MAX_TOKENS } from '../../constants';
+import { isPlainObject } from '../guards';
+
 /**
  * 本文件所需的最小形状。
  *
@@ -145,7 +148,7 @@ export function toTavernSource(format: unknown): string {
 
 /** 把 ACU 的一条 `ApiPreset_ACU` 换算成我们自己的形状。名字为空就返回 null（会被计为 skipped）。 */
 export function toPlotApiEntry(raw: unknown, ordinal: number): PlotApiEntryLike | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (!isPlainObject(raw)) return null;
   const preset = raw as Record<string, unknown>;
   const name = typeof preset.name === 'string' ? preset.name.trim() : '';
   if (!name) return null;
@@ -171,7 +174,7 @@ export function toPlotApiEntry(raw: unknown, ordinal: number): PlotApiEntryLike 
     //   claude_messages → claude、gemini_interactions → makersuite、
     //   openai_compat / openai_responses → custom（酒馆没有 responses 后端，回退 chat/completions）。
     source: apiMode === 'custom' ? toTavernSource(config.customApiFormat) : '',
-    maxTokens: typeof maxTokensRaw === 'number' && Number.isFinite(maxTokensRaw) ? Math.floor(maxTokensRaw) : 60000,
+    maxTokens: typeof maxTokensRaw === 'number' && Number.isFinite(maxTokensRaw) ? Math.floor(maxTokensRaw) : DEFAULT_MAX_TOKENS,
     temperature: typeof config.temperature === 'number' && Number.isFinite(config.temperature) ? config.temperature : 1,
     /** 记下它原来叫什么，面板上能一眼看出「这条是从 ACU 抄来的」 */
     importedFrom: name || `第 ${ordinal + 1} 条`,

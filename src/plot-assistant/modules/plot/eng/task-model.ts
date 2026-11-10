@@ -5,9 +5,10 @@
  *
  * 三条设计约束：
  * 1. **不认识 ACU**。这里没有全局状态、没有世界书、没有表格，只做数据整形。
- * 2. **不认识默认提示词**。预设没带提示词组时该用什么默认内容，是产品决策，
- *    由调用方通过 `resolvePromptGroup` 的 `buildDefault` 注入（依赖注入，不写死在这里）。
- * 3. **字段顺序即契约**。返回对象的键顺序与 ACU 保持一致，因为落盘后要按 JSON 逐字节比对。
+ * 2. **不认识默认提示词**。任务没写提示词组就是空表，不在这一层塞默认内容。
+ * 3. **只认新式 `plotTasks[]`**。老预设那种「预设级两段纯文本 + 主插槽 A/B」的兜底链
+ *    已移除：导进来会在引擎入口显式报错，不再静默不跑。
+ * 4. **字段顺序即契约**。返回对象的键顺序与 ACU 保持一致，因为落盘后要按 JSON 逐字节比对。
  */
 
 import type { TaskSchedule } from './schedule';
@@ -25,14 +26,11 @@ export interface PlotTaskAgentControl {
   preferredOrder?: number;
 }
 
-/** 提示词组里的一段。`mainSlot` 标出「主提示词 A」与「拦截指令 B」这两个特殊位。 */
+/** 提示词组里的一段。 */
 export interface PlotPromptSegment {
   role?: string;
   content?: string;
   deletable?: boolean;
-  mainSlot?: string;
-  isMain?: boolean;
-  isMain2?: boolean;
   id?: string;
   [key: string]: unknown;
 }
@@ -45,6 +43,14 @@ export interface PlotTask {
   promptGroup: PlotPromptSegment[];
   extractTags: string;
   extractInjectTags: string;
+  /**
+   * 豁免标签（第 51 批新增，上游**没有**这个字段）。
+   *
+   * 这些标签不要求每轮 AI 回传都出现；回传了仍照常抽取、落盘、进世界书。
+   * 和 schedule / apiName 一样只在源数据真的写了才带上这个键，
+   * 免得改变没有该字段的旧预设的逐字节形状。
+   */
+  exemptTags?: string;
   finalDirectiveTemplate: string;
   minLength: number;
   maxRetries: number;
@@ -170,14 +176,6 @@ export function normalizeAgentControl(value: unknown, fallbackValue: unknown = n
 
 // ───────────────────────── 提示词组 ─────────────────────────
 
-/** 从老式的三段提示词结构里按 id 取一段内容。 */
-export function legacyPromptFromThree(prompts: unknown, id: string): string {
-  if (!prompts) return '';
-  if (Array.isArray(prompts)) return (prompts.find((item: Loose) => item && item.id === id)?.content) || '';
-  if (typeof prompts === 'object') return (prompts as Loose)[id] || '';
-  return '';
-}
-
 /** 判断一个数组是不是「提示词组」（有 role/content，没有 id）。 */
 function looksLikeSegmentList(arr: unknown): boolean {
   if (!Array.isArray(arr) || arr.length === 0) return false;
@@ -185,63 +183,21 @@ function looksLikeSegmentList(arr: unknown): boolean {
   return !!first && typeof first === 'object' && 'role' in first && 'content' in first && !('id' in first);
 }
 
-/** 取一段的槽位：A = 主提示词，B = 拦截指令。兼容老字段 isMain / isMain2。 */
-function segmentSlot(segment: Loose | null | undefined): '' | 'A' | 'B' {
-  if (!segment) return '';
-  const slot = String(segment.mainSlot || '').toUpperCase();
-  if (slot === 'A' || slot === 'B') return slot as 'A' | 'B';
-  if (segment.isMain) return 'A';
-  if (segment.isMain2) return 'B';
-  return '';
-}
-
-/** 从提示词组里抽出「主提示词」与「系统提示词」两段内容（老式三段结构用）。 */
-export function legacyPromptTexts(promptGroup: unknown): { mainPrompt: string; systemPrompt: string } {
-  const segments: Loose[] = Array.isArray(promptGroup) ? promptGroup : [];
-  return {
-    mainPrompt: segments.find(s => segmentSlot(s) === 'A')?.content || '',
-    systemPrompt: segments.find(s => segmentSlot(s) === 'B')?.content || '',
-  };
-}
-
-/** 预设没带提示词组时用的兜底：A/B 两个槽都留空。 */
-export function buildEmptyPromptGroup({
-  mainAContent = '',
-  mainBContent = '',
-}: { mainAContent?: string; mainBContent?: string } = {}): PlotPromptSegment[] {
-  const base: PlotPromptSegment[] = [
-    { role: 'SYSTEM', content: String(mainAContent), deletable: false, mainSlot: 'A', isMain: true },
-    { role: 'USER', content: String(mainBContent), deletable: false, mainSlot: 'B', isMain2: true },
-  ];
-  return base;
-}
-
 /**
- * 解析出任务实际使用的提示词组。四级回退，顺序不能变：
- * `promptGroup` → `prompts`（像是提示词组时）→ 拼两段老的正文/系统提示词 → 调用方给的默认。
+ * 解析出任务实际使用的提示词组。只有两级：
+ * `promptGroup` → `prompts`（像是提示词组时）。
+ *
+ * 老预设那种「预设级 mainPrompt / systemPrompt 两段纯文本，或 prompts 三段按 id 查」
+ * 的兜底链已移除：那种预设在引擎入口会被显式拦下并报错，这里不再凭空造 A/B 两槽。
  */
-export function resolvePromptGroup(
-  source: Loose | null,
-  {
-    fallbackPromptGroup = null as unknown,
-    buildDefault = buildEmptyPromptGroup,
-  }: {
-    fallbackPromptGroup?: unknown;
-    buildDefault?: (init: { mainAContent?: string; mainBContent?: string }) => PlotPromptSegment[];
-  } = {},
-): PlotPromptSegment[] {
+export function resolvePromptGroup(source: Loose | null): PlotPromptSegment[] {
   if (Array.isArray(source?.promptGroup) && source.promptGroup.length > 0) {
     return JSON.parse(JSON.stringify(source.promptGroup));
   }
   if (looksLikeSegmentList(source?.prompts)) {
     return JSON.parse(JSON.stringify(source!.prompts));
   }
-  const fallbackTexts = legacyPromptTexts(fallbackPromptGroup);
-  const legacyMain =
-    source?.mainPrompt || legacyPromptFromThree(source?.prompts, 'mainPrompt') || fallbackTexts.mainPrompt || '';
-  const legacySystem =
-    source?.systemPrompt || legacyPromptFromThree(source?.prompts, 'systemPrompt') || fallbackTexts.systemPrompt || '';
-  return buildDefault({ mainAContent: legacyMain, mainBContent: legacySystem });
+  return [];
 }
 
 // ───────────────────────── 任务 ─────────────────────────
@@ -255,7 +211,7 @@ const DEFAULT_MAX_RETRIES = 3;
  * 否则返回 `null` —— 让调用方**不写这个键**。理由见 `PlotTask.schedule` 的注释：
  * 上游数据没有它，凭空多一个空对象会让逐字节比对的用例全红。
  *
- * 脏值一律丢弃（`'abc'`、`0`、`-3`）而不是落成 0/NaN：周期是「每几轮跑一次」，
+ * 脏值一律丢弃（`'abc'`、`0`、`-3`）而不是落成 0/NaN：周期是「每几楼进行一次」，
  * 落成 0 会让 `shouldRunTask` 每轮都判成到期，落成 NaN 会让它永远判成没到期。
  */
 function normalizeTaskApiName(primary: unknown, fallback: unknown): string {
@@ -285,8 +241,9 @@ function normalizeTaskSchedule(primary: unknown, fallback: unknown): TaskSchedul
 /**
  * 规范化单个任务。
  *
- * `fallbackTask` 是「同一份预设里已经算好的那个兜底任务」——它保证
- * 「任务只写了 name、别的一概没写」时也能拿到合理的 id / 提示词组 / 阶段。
+ * `fallbackTask` 是可选的字段来源：任务没写的字段会沿用它的值。
+ * 老格式预设那种「整份设置拼一条兜底任务、再拿它喂给每个任务」的用法已删，
+ * 现在由调用方自己决定要不要传；不传时每个任务独立按默认值规范化。
  */
 export function normalizeTask(
   task: Loose | null,
@@ -294,7 +251,6 @@ export function normalizeTask(
     index = 0,
     fallbackTask = null as Loose | null,
   }: { index?: number; fallbackTask?: Loose | null } = {},
-  deps: { buildDefault?: (init: { mainAContent?: string; mainBContent?: string }) => PlotPromptSegment[] } = {},
 ): PlotTask {
   const cloned: Loose = task && typeof task === 'object' ? JSON.parse(JSON.stringify(task)) : {};
   const fallback: Loose | null = fallbackTask && typeof fallbackTask === 'object' ? fallbackTask : null;
@@ -305,12 +261,10 @@ export function normalizeTask(
   const fallbackName = `剧情任务${index + 1}`;
   const taskName = String(cloned.name || fallback?.name || fallbackName).trim() || fallbackName;
 
-  const promptGroup = resolvePromptGroup(cloned, {
-    fallbackPromptGroup: fallback?.promptGroup || null,
-    buildDefault: deps.buildDefault,
-  });
+  const promptGroup = resolvePromptGroup(cloned);
   const schedule = normalizeTaskSchedule(cloned.schedule, fallback?.schedule);
   const apiName = normalizeTaskApiName(cloned.apiName, fallback?.apiName);
+  const exemptTags = typeof cloned.exemptTags === 'string' ? cloned.exemptTags : fallback?.exemptTags || '';
 
   return {
     id: taskId,
@@ -320,6 +274,7 @@ export function normalizeTask(
     extractTags: typeof cloned.extractTags === 'string' ? cloned.extractTags : fallback?.extractTags || '',
     extractInjectTags:
       typeof cloned.extractInjectTags === 'string' ? cloned.extractInjectTags : fallback?.extractInjectTags || '',
+    ...(exemptTags !== '' ? { exemptTags } : {}),
     finalDirectiveTemplate:
       typeof cloned.finalDirectiveTemplate === 'string'
         ? cloned.finalDirectiveTemplate
@@ -343,50 +298,20 @@ export function normalizeTask(
   };
 }
 
-/** 用老式「整份设置」拼出一个默认任务（预设还是老格式时用）。 */
-export function legacyWrappedTask(
-  source: Loose | null,
-  { taskId = 'defaultPlotTask', taskName = '默认任务', order = 0 } = {},
-  deps: { buildDefault?: (init: { mainAContent?: string; mainBContent?: string }) => PlotPromptSegment[] } = {},
-): PlotTask {
-  return normalizeTask(
-    {
-      id: taskId,
-      name: taskName,
-      enabled: true,
-      promptGroup: resolvePromptGroup(source, { buildDefault: deps.buildDefault }),
-      extractTags: typeof source?.extractTags === 'string' ? source.extractTags : '',
-      minLength: source?.minLength,
-      maxRetries: source?.loopSettings?.maxRetries,
-      mergeStrategy: 'append',
-      stage: 1,
-      order,
-    },
-    { index: order },
-    deps,
-  );
-}
-
 /**
- * 规范化任务列表。
- *
- * 三种来源都吃得下：新式 `plotTasks[]`、老式单任务（整份设置当任务）、以及「空」。
+ * 规范化任务列表。只认新式 `plotTasks[]`：
+ * 预设没写任务表（或写的是老格式的两段纯文本）就返回空表，
+ * 由引擎入口显式报「不支持老格式预设」，不再凭空拼一条兜底任务。
  * 返回按 `order` 升序排列。
  */
-export function normalizeTasks(
-  source: Loose | null,
-  { fallbackTaskId = 'defaultPlotTask', fallbackTaskName = '默认任务' } = {},
-  deps: { buildDefault?: (init: { mainAContent?: string; mainBContent?: string }) => PlotPromptSegment[] } = {},
-): PlotTask[] {
+export function normalizeTasks(source: Loose | null): PlotTask[] {
   const base: Loose = source && typeof source === 'object' ? source : {};
-  const fallbackTask = legacyWrappedTask(base, { taskId: fallbackTaskId, taskName: fallbackTaskName, order: 0 }, deps);
+  const rawTasks = Array.isArray(base.plotTasks) ? base.plotTasks : [];
+  if (rawTasks.length === 0) return [];
 
-  const rawTasks: Loose[] =
-    Array.isArray(base.plotTasks) && base.plotTasks.length > 0 ? base.plotTasks : [fallbackTask];
-
-  return rawTasks
-    .map((task, index) =>
-      normalizeTask(task, { index, fallbackTask: { ...fallbackTask, order: index } }, deps),
-    )
-    .sort((a, b) => a.order - b.order);
+  // 每个任务独立规范化。原件会把「整份老设置拼成的兜底任务」当 fallback 喂给
+  // 每个任务（连 name / agentControl 都会渗透），那是老预设专用的兼容层；
+  // 删掉之后不再让第一个任务去顶替它，否则第二个任务的 order / agentControl
+  // 会被第一个任务的值悄悄覆盖。
+  return rawTasks.map((task, index) => normalizeTask(task, { index })).sort((a, b) => a.order - b.order);
 }

@@ -6,7 +6,7 @@ import { runNativeRefresh, runRerushFlow } from './actions';
 import { showPrefsPanel } from './settings-panel';
 import { findScriptButton } from './script-button';
 import { isCurrentInstance } from './instance';
-import { logInfo } from './logger';
+import { logInfo, logWarn } from './logger';
 import { MSG, TAG } from './copy';
 import type { ActionKey, RerushContext } from './types';
 
@@ -47,10 +47,16 @@ export function runGestureAction(ctx: RerushContext, actionKey: ActionKey, gestu
       void runNativeRefresh(ctx);
       break;
     case 'full':
-      void runRerushFlow(ctx, true);
+      void runRerushFlow(ctx, true).catch((error: unknown) => {
+        logWarn(TAG.route, MSG.flowAborted(error instanceof Error ? error.message : String(error)), error);
+        standDown();
+      });
       break;
     case 'edit':
-      void runRerushFlow(ctx, false);
+      void runRerushFlow(ctx, false).catch((error: unknown) => {
+        logWarn(TAG.route, MSG.flowAborted(error instanceof Error ? error.message : String(error)), error);
+        standDown();
+      });
       break;
     case 'settings': {
       logInfo(TAG.route, MSG.openPanel);

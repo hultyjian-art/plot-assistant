@@ -20,6 +20,7 @@
  * 不判定失败、不弹提示。`error` 只交给运行日志，供事后查因。
  */
 
+import { isPlainObject } from '../guards';
 import { resolveSummaryIndexText, type PlotTablesJson } from '../eng/data-format';
 import { acuHostWindows } from './acu-presets';
 
@@ -35,7 +36,7 @@ export interface TableReadResult {
 }
 
 function toPlainObject(value: unknown): PlotTablesJson {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  if (!isPlainObject(value)) return {};
   return value as PlotTablesJson;
 }
 
