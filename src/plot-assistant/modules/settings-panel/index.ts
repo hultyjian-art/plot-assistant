@@ -4,7 +4,7 @@
  */
 import { createApp } from 'vue';
 import { createScriptIdDiv, teleportStyle } from '@util/script';
-import { INSTANCE_ATTR, MODAL_HOST_ID } from '../constants';
+import { INSTANCE_ATTR, MODAL_HOST_ID, TOAST_URGENT_MS } from '../constants';
 import { pageQuery, pageToastr } from '../tavern';
 import { loadSettings, saveSettings } from '../settings';
 import { logInfo } from '../logger';
@@ -54,11 +54,19 @@ export function showPrefsPanel(ctx: RerushContext): void {
     settings: ctx.settings,
     // 面板里「预览这次会发什么」要真去取一遍世界书/表格，必须拿着同一个 ctx
     ctx,
-    onSave: (settings: RerushSettings) => {
-      saveSettings(ctx, settings);
+    onSave: (settings: RerushSettings, done?: (ok: boolean) => void) => {
+      // saveSettings 写完会回读核对：酒馆变量写入失败时它不抛错、也不给回执，
+      // 只能靠回读判断。失败要如实告诉用户，并且让面板把「未保存」标记留着。
+      const saved = saveSettings(ctx, settings);
+      if (!saved) {
+        pageToastr()?.error(MSG.settingsSaveFailed, '', { timeOut: TOAST_URGENT_MS });
+        done?.(false);
+        return;
+      }
       ctx.onSettingsSaved?.();
       // 存完要当场告诉人一声：面板底部的按钮没有任何回执，用户会以为没点上。
       pageToastr()?.success(MSG.settingsSaved);
+      done?.(true);
     },
     onClose: close,
   });

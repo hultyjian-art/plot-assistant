@@ -21,7 +21,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'save', settings: RerushSettings): void;
+  /**
+   * 保存。父组件通过回传的布尔值告诉面板「有没有真的写进酒馆变量」：
+   * 返回 false 时不要把「未保存」标记清掉，否则用户会以为存好了
+   * （见 onSave 里 saveSettings 的回读核对）。
+   */
+  (e: 'save', settings: RerushSettings, done?: (ok: boolean) => void): void;
   (e: 'close'): void;
 }>();
 
@@ -434,6 +439,15 @@ function save(): void {
 
   const { tapWindowMs, holdMs } = draft.timing;
   // 手输的数字一律钳回合法区间：脏值写进变量后，下次读取时 zod 校验不过会整份退回默认值
+  //
+  // 收尾统一走 done 回调：父组件用它告诉我们「有没有真的写进酒馆变量」。
+  // 不能无条件 markSaved —— 写盘可能静默失败，那时清掉「未保存」标记等于骗人。
+  // 父组件没调用回调（老路径）时按「存好了」处理，行为与以前一致。
+  let settled = false;
+  const done = (ok: boolean): void => {
+    settled = true;
+    if (ok) plotPage.value?.markSaved();
+  };
   emit('save', {
     bindings: { ...draft.bindings },
     presets: draft.presets.map((preset) => ({ ...preset })),
@@ -446,11 +460,10 @@ function save(): void {
     // 剧情推进的草稿在 PlotPage 手里，从它那里读最新的一份；
     // 那一页从没打开过时它还没挂载，就沿用初始化时拷的那份（等同于"没改动"）。
     plot: readPlotDraft(plotPage.value?.draft ?? draft.plot),
-  });
+  }, done);
 
-  // 存下去了就重新拍一张快照，「还没保存」的提示才会跟着消失。
-  // 放在 emit 之后：父组件抛错时走不到这里，提示会留着，这是对的。
-  plotPage.value?.markSaved();
+  // 父组件是同步调用的，走到这里回调已经跑过了；没跑说明是老路径（没人关心结果）。
+  if (!settled) plotPage.value?.markSaved();
 }
 </script>
 

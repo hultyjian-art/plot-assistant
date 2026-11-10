@@ -57,6 +57,13 @@ export interface PlotSendOptions {
    *   两边都写就会各说各话 —— 用户改了一边，另一边不跟着动。
    */
   mode?: 'upgrade' | 'qrf';
+  /**
+   * 这一轮真正写进输入框、发出去的文本。
+   * 等楼层时拿它认领「是不是刚发出的那一条」：导入聊天 / 删层重刷之后，同一个楼层号上
+   * 可能还留着上一版或别的输入，光看楼层号就把锚点写上去会记到别人的楼层。
+   * 不传时退回 `commit.finalMessage`（两条发送路径都是 join:'final'，它就是发出去的文本）。
+   */
+  expectedText?: string;
 }
 
 /**
@@ -72,25 +79,35 @@ export async function completePlotSend(
   const pollMs = typeof options.pollMs === 'number' && options.pollMs > 0 ? options.pollMs : DEFAULT_POLL_MS;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
+  // 认领刚发出的那一条要三样都对上：楼层号、role、正文。
+  // 只等「这一层出现」不够 —— 导入/删层之后同一个楼层号上可能还是上一版或别的输入，
+  // 直接写锚点就记到别人的楼层了。对不上就继续等，直到超时，全程不碰写回。
+  const expectedText = typeof options.expectedText === 'string' ? options.expectedText : commit.finalMessage;
   const deadline = Date.now() + timeoutMs;
   let floor: FloorLike | null = null;
+  let mismatchNote = '';
 
   for (;;) {
-    floor = readFloor(commit.floorId);
-    if (floor) break;
+    const candidate = readFloor(commit.floorId);
+    if (candidate) {
+      if (isThisSend(candidate, commit.floorId, expectedText)) {
+        floor = candidate;
+        break;
+      }
+      mismatchNote = describeMismatch(candidate, commit.floorId, expectedText);
+    }
     if (Date.now() > deadline) break;
     await sleep(pollMs);
   }
 
   if (!floor) {
-    return { landed: false, plotCount: 0, written: false, note: `发送后 ${Math.round(timeoutMs / 1000)} 秒内没等到第 ${commit.floorId} 层` };
-  }
-  if (floor.role !== 'user') {
     return {
       landed: false,
       plotCount: 0,
       written: false,
-      note: `第 ${commit.floorId} 层不是用户消息（role=${floor.role}），跳过写回`,
+      note: mismatchNote
+        ? `第 ${commit.floorId} 层不是本次发出的那条（${mismatchNote}），等到超时也没对上，跳过写回`
+        : `发送后 ${Math.round(timeoutMs / 1000)} 秒内没等到第 ${commit.floorId} 层`,
     };
   }
 
@@ -164,4 +181,23 @@ function readFloor(messageId: number): FloorLike | null {
   const first = Array.isArray(floors) ? floors[0] : undefined;
   if (!first || typeof first.message !== 'string') return null;
   return first;
+}
+
+/**
+ * 楼层号、role、正文三样都对上，才认作「刚发出的那一条」。
+ * message_id 也要核对：`readFloor` 按号取层，取回来的那条理论上就是它，
+ * 但导入/删层后的边界情况宁可再核一次，别把锚点写到别人身上。
+ */
+function isThisSend(floor: FloorLike, floorId: number, expectedText: string): boolean {
+  return floor.message_id === floorId
+    && floor.role === 'user'
+    && floor.message === expectedText;
+}
+
+/** 给日志一句话说明差在哪，方便真机排查「为什么等不到」。 */
+function describeMismatch(floor: FloorLike, floorId: number, expectedText: string): string {
+  if (floor.message_id !== floorId) return `读到的 message_id=${floor.message_id}，预期 ${floorId}`;
+  if (floor.role !== 'user') return `role=${floor.role}，预期 user`;
+  if (floor.message !== expectedText) return '正文与发出去的文本不一致';
+  return '身份未确认';
 }

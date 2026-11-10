@@ -55,6 +55,7 @@ export const MSG = {
   panelStaleRemoved: '发现上一版脚本留下的面板挂载点，已清掉再挂新的',
   panelRaised: '设置面板本来就开着，已把它挪到最前面',
   settingsSaved: '保存好了。',
+  settingsSaveFailed: '设置没能存进酒馆，可能是酒馆变量写入失败，请重试；若反复失败请重载脚本。',
   settingsPresetInvalid: (reason: string): string => `预设校验未通过，全部改动未保存：${reason}`,
 
   // —— 手势识别

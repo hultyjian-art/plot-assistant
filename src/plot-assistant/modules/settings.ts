@@ -692,10 +692,57 @@ function readStoredSettings(): Partial<RerushSettings> & FlatLegacy {
   return {};
 }
 
-export function saveSettings(ctx: RerushContext, patch: Partial<RerushSettings>): void {
+/**
+ * 存设置，并**如实回答存成了没有**。
+ *
+ * 为什么要有返回值：`replaceVariables` 的签名是 `void`，调用方拿不到任何回执
+ * （@types/function/variables.d.ts:91）。写盘万一失败，内存里已经是新值、界面显示新值，
+ * 而酒馆变量还是旧的 —— 用户看到「保存好了」，重开面板才发现全回退了。
+ * 所以这里写完回读一次，把「真写进去了」变成可判断的事实。
+ *
+ * 返回值只表示**写盘**的结果；`ctx.settings` 在写盘前就已更新（内存先行是既有约定，
+ * 当前会话要立刻按新设置跑）。写盘失败时调用方应提示用户并保留「未保存」标记。
+ */
+export function saveSettings(ctx: RerushContext, patch: Partial<RerushSettings>): boolean {
   ctx.settings = { ...ctx.settings, ...patch };
-  // 写酒馆变量前用 klona 剥掉 Vue 的 proxy 层，否则响应式对象无法正确序列化。
-  replaceVariables(klona(forStorage(ctx.settings)), { type: 'extension', extension_id: SETTINGS_EXTENSION_ID });
+  const payload = klona(forStorage(ctx.settings));
+  try {
+    // 写酒馆变量前用 klona 剥掉 Vue 的 proxy 层，否则响应式对象无法正确序列化。
+    replaceVariables(klona(payload), { type: 'extension', extension_id: SETTINGS_EXTENSION_ID });
+  } catch (error) {
+    logWarn(TAG.conf, '设置写盘失败（replaceVariables 抛错）', error);
+    return false;
+  }
+  // 回读核对：不依赖接口给回执，用「读回来的和写下去的像不像」判断。
+  // 只比关键几段而不是整份字符串 —— apiKey 落盘前会混淆、来回解一次未必逐字节相同。
+  try {
+    const readBack = getVariables({ type: 'extension', extension_id: SETTINGS_EXTENSION_ID });
+    return settingsLandingLooksRight(payload, readBack);
+  } catch (error) {
+    logWarn(TAG.conf, '设置写盘后回读失败', error);
+    return false;
+  }
+}
+
+/**
+ * 回读核对：比版本号 + 几个稳定字段，而不是整份 JSON。
+ *
+ * 判据是「够不够发现写盘没生效」，不是「逐字节相同」——apiKey 混淆、zod 补默认值
+ * 都会让两边不完全一样，而那些都不是失败。
+ */
+function settingsLandingLooksRight(written: RerushSettings, readBack: unknown): boolean {
+  if (!readBack || typeof readBack !== 'object') return false;
+  const got = readBack as Partial<RerushSettings> & Record<string, unknown>;
+  // 默认值印章：每次写盘都带着，读回来没有/不一样说明这份根本不是我们刚写的那份。
+  if (typeof got.stamp !== 'string' || got.stamp !== written.stamp) return false;
+  const gotPlot = got.plot as Partial<RerushSettings['plot']> | undefined;
+  if (!gotPlot || typeof gotPlot !== 'object') return false;
+  // 再挑三个用户能改、且不涉及密钥混淆的字段：对不上就是真没写进去。
+  if (gotPlot.enabled !== written.plot.enabled) return false;
+  if (gotPlot.stashMode !== written.plot.stashMode) return false;
+  if ((gotPlot.presetName ?? '') !== (written.plot.presetName ?? '')) return false;
+  if (Array.isArray(gotPlot.apis) && gotPlot.apis.length !== written.plot.apis.length) return false;
+  return true;
 }
 
 /**

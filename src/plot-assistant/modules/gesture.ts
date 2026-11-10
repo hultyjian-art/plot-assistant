@@ -249,6 +249,12 @@ export function mountGestureWatch(ctx: RerushContext): void {
     const key = (e as KeyboardEvent).key;
     if (key !== 'Enter' && key !== ' ') return;
 
+    // 按住不放时系统会不断派发 repeat keydown。现在挡住重复按键的其实是
+    // 「打开面板时把焦点从按钮上移走」这个副作用（router 的 standDown 会 blur），
+    // 一旦某次找不到按钮、焦点没被移走，按住 Enter 就会反复派发、反复写日志。
+    // 这里显式过滤掉自动重复：首次按下 repeat 为 false，单击路径完全不变。
+    if ((e as KeyboardEvent).repeat) return;
+
     e.preventDefault();
     if (ctx.state.locked) return;
 

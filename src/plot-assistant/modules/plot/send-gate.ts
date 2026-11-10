@@ -28,13 +28,45 @@
  */
 
 import { TOAST_NOTICE_MS } from '../constants';
-import { pageQuery, parentWindow, pageToastr } from '../tavern';
+import { currentMessageId, pageQuery, parentWindow, pageToastr } from '../tavern';
 import { logInfo, logWarn } from '../logger';
 import { TAG, MSG, UI } from '../copy';
 import { appendPlotBlock } from './run-in-flow';
 import { completePlotSend } from './after-send';
 import { clearSendBypass, consumeSendBypass } from './send-bypass';
 import type { RerushContext } from '../types';
+
+/**
+ * 发送前推算「这一条用户消息发出去会占第几楼」——取酒馆数据里的真实楼层号，不数页面气泡。
+ *
+ * 为什么不能数 `#chat .mes`：隐藏楼层不渲染成气泡，刚导入聊天或批量删改之后页面与数据
+ * 也会短暂不同步；气泡个数减一得到的号会偏，暂存账和运行日志就会锚到错层、甚至超时丢失。
+ *
+ * 主路：`currentMessageId()`（tavern.ts 对酒馆助手 `getLastMessageId()` 的封装，酒馆没就绪时
+ * 返回 undefined），拿到的就是当前真实最后一楼号，新楼 = 它 + 1。
+ *
+ * 降级：`getChatMessages(-1)[0].message_id`。这也是读真实数据，不是数 DOM：-1 只取最新一条
+ * （O(1)），且 `hide_state` 默认 'all'，隐藏楼层照样在内（@types/function/chat_message.d.ts
+ * :25/:34/:50）。接口暂时拿不到时用它，绝不退回页面气泡数凑数。
+ *
+ * 两条都拿不到：返回 null。调用方会把锚点留空 —— appendPlotBlock 没有 anchor 时不记暂存、
+ * 不写运行日志、不产 commit，宁可这一轮不记账，也不把账记到猜出来的楼层号上。
+ */
+export function nextUserFloorId(): number | null {
+  const lastId = currentMessageId();
+  if (typeof lastId === 'number' && Number.isFinite(lastId)) return lastId + 1;
+
+  try {
+    if (typeof getChatMessages === 'function') {
+      const rows = getChatMessages(-1) as unknown as Array<{ message_id?: number }>;
+      const fallbackId = Array.isArray(rows) ? rows[0]?.message_id : undefined;
+      if (typeof fallbackId === 'number' && Number.isFinite(fallbackId)) return fallbackId + 1;
+    }
+  } catch (error) {
+    logWarn(TAG.plotGate, '读不到真实最后一楼：这一轮不猜楼层号', error);
+  }
+  return null;
+}
 
 /** 气泡节点 id。同一个页面只留一个，旧实例留下的先删掉。 */
 const BUBBLE_ID = 'rh-plot-bubble';
@@ -356,11 +388,14 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
 
     try {
       logInfo(TAG.plotGate, MSG.plotGateStart);
-      // 锚点：这一条发出去后会占用的用户楼层号 = 当前最后一层 + 1。
+      // 锚点：这一条发出去后会占用的用户楼层号 = 真实最后一楼 + 1（不数页面气泡）。
       // 暂存账用它认领「同一条输入被跑了两版」的情况。
-      const lastId = pageQuery()('#chat .mes').length - 1;
+      const floorId = nextUserFloorId();
+      if (floorId === null) {
+        logWarn(TAG.plotGate, '读不到真实楼层号：这一轮不记暂存账、不写运行日志（绝不用页面气泡数凑数）');
+      }
       const result = await appendPlotBlock(ctx, text, {
-        floor: { messageId: lastId + 1, floorText: text },
+        floor: floorId === null ? null : { messageId: floorId, floorText: text },
         signal: abort.signal,
         // 正文只放最终注入指令（见文件头「三种结局」第 1 条）
         join: 'final',
@@ -398,7 +433,7 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
         const commit = result.commit;
         if (commit) {
           const mode = ctx.settings.plot.stashMode;
-          void completePlotSend(commit, { mode })
+          void completePlotSend(commit, { mode, expectedText: result.text })
             .then((check) => {
               if (!check.landed) logWarn(TAG.plotGate, `楼层收尾没等到：${check.note}`);
               else if (check.plotCount !== 1) logWarn(TAG.plotGate, `楼层收尾异常：${check.note}`);
