@@ -116,6 +116,8 @@ export interface TaskDraft {
   minLength: number;
   /** 每 N 条用户楼层跑一次；1 = 每条（上游行为）。 */
   everyRounds: number;
+  /** 手动触发：开启后不按间隔自动跑，改由楼层按钮预约。默认 false = 按间隔自动跑。 */
+  manual: boolean;
   extractTags: string;
   extractInjectTags: string;
   /** 豁免标签：不要求每轮回传，回传了仍照常抽取/落盘。 */
@@ -440,6 +442,7 @@ function readTaskDraft(task: Loose, index: number): TaskDraft {
     maxRetries: clampInt(task.maxRetries, DEFAULT_TASK_MAX_RETRIES, 1),
     minLength: clampInt(task.minLength, 0, 0),
     everyRounds: normalizeEveryRounds(asRecord(task.schedule)?.everyRounds),
+    manual: asRecord(task.schedule)?.manual === true,
     extractTags: joinTags(task.extractTags),
     extractInjectTags: joinTags(task.extractInjectTags),
     exemptTags: joinTags(task.exemptTags),
@@ -528,7 +531,7 @@ export function applyTaskDrafts(data: unknown, drafts: TaskDraft[]): Loose {
     task.finalDirectiveTemplate = text(draft.finalDirectiveTemplate);
     task.description = text(draft.description);
 
-    writeSchedule(task, draft.everyRounds);
+    writeSchedule(task, draft);
     writeTaskApi(task, draft.apiName);
     writeTaskBlocks(task, draft);
     return task;
@@ -537,14 +540,6 @@ export function applyTaskDrafts(data: unknown, drafts: TaskDraft[]): Loose {
   return base;
 }
 
-/**
- * 触发周期。
- *
- * 存在 `task.schedule.everyRounds` 上（`eng/schedule.ts` 认这个位置）。
- * `everyRounds === 1` 时**删掉这个键**而不是写 1：缺省就是每轮，
- * 写死 1 会让「用户显式设成每轮」与「上游数据从来没有这个键」无法区分。
- * `schedule` 里其它键（将来可能有 `lastRound`）不动。
- */
 /**
  * 任务级 API。
  *
@@ -558,13 +553,30 @@ function writeTaskApi(task: Loose, apiName: unknown): void {
   else task.apiName = name;
 }
 
-function writeSchedule(task: Loose, everyRounds: unknown): void {
-  const every = normalizeEveryRounds(everyRounds);
+/**
+ * 触发周期 + 手动触发标记。
+ *
+ * 两个键都落在 `task.schedule` 上：`everyRounds` 归 `eng/schedule.ts` 认，
+ * `manual` 归手动触发那边认。三条形状纪律由逐字节比对测试锁着，别顺手加键：
+ *
+ * - `everyRounds === 1` 时**删掉这个键**而不是写 1：缺省就是每轮，
+ *   写死 1 会让「用户显式设成每轮」与「上游数据从来没有这个键」无法区分；
+ * - `manual` **只写 `true`，不写 `false`**：关闭 = 删键，绝不把默认值塞进导出文件；
+ * - `schedule` 里其它键（`lastRound` 之类）一律不动，合并完整个对象变空才删 `schedule`。
+ *
+ * 早退那句要带 `!manual`：新建任务原本没有 `schedule`，打开手动触发时
+ * 「每轮 + 没有 schedule」已经不是缺省状态，得为 `manual: true` 把这个对象建出来。
+ */
+function writeSchedule(task: Loose, draft: TaskDraft): void {
+  const every = normalizeEveryRounds(draft.everyRounds);
+  const manual = draft.manual === true;
   const existing = asRecord(task.schedule);
-  if (every === 1 && !existing) return;
+  if (every === 1 && !manual && !existing) return;
   const schedule: Loose = { ...(existing || {}) };
   if (every === 1) delete schedule.everyRounds;
   else schedule.everyRounds = every;
+  if (manual) schedule.manual = true;
+  else delete schedule.manual;
   if (Object.keys(schedule).length === 0) delete task.schedule;
   else task.schedule = schedule;
 }
@@ -663,6 +675,7 @@ export function newTaskDraft(existing: TaskDraft[]): TaskDraft {
     maxRetries: DEFAULT_TASK_MAX_RETRIES,
     minLength: 0,
     everyRounds: 1,
+    manual: false,
     extractTags: '',
     extractInjectTags: '',
     exemptTags: '',
@@ -762,6 +775,7 @@ export function cloneTaskDraft(source: TaskDraft, existing: TaskDraft[]): TaskDr
     maxRetries: clampInt(source.maxRetries, DEFAULT_TASK_MAX_RETRIES, 0),
     minLength: clampInt(source.minLength, 0, 0),
     everyRounds: normalizeEveryRounds(source.everyRounds),
+    manual: source.manual === true,
     extractTags: text(source.extractTags),
     extractInjectTags: text(source.extractInjectTags),
     exemptTags: text(source.exemptTags),

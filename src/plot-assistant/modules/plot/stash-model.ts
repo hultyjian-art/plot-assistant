@@ -33,6 +33,15 @@ export interface StashLanding {
    */
   taskTags?: Record<string, WorkingTaskTags>;
   /**
+   * 从上一楼层继承来的标签快照（按任务 id 分组）。**老账没有这个字段**，读的时候按空处理。
+   *
+   * 为什么要有它：账本只留最近三层，低频任务（每 N 楼且 N 大于保留层数）上一次的产出
+   * 会随着旧 entry 被裁掉，下一轮拿不到它的标签，差量合并会把补丁当全文。每次落盘时
+   * 把上一层还有、这一层没覆盖的标签抄进来，三层窗口就变成一条不断代的滚动带。
+   * 它只供历史标签投影读取，不算这一版的 `taskTags`（不会影响缺口语义）。
+   */
+  carriedTags?: Record<string, WorkingTaskTags>;
+  /**
    * 落盘时「最终注入模板」里写了哪些标签 —— 也就是**本该进正文**的那些。
    *
    * 为什么不从 `taskTags` 推：任务抽到的标签和进正文的标签是两回事。用户可以在
@@ -205,7 +214,8 @@ export function collectStashTagMap(
     .filter(entry => (Number(entry.floorId) || 0) < currentFloorId)
     .sort((a, b) => (Number(b.floorId) || 0) - (Number(a.floorId) || 0));
   for (const entry of candidates) {
-    const saved = activeLanding(entry)?.taskTags;
+    const landing = activeLanding(entry);
+    const saved = landing ? taskTagRecordsOfLanding(landing) : entry.working?.taskTags;
     if (!saved) continue;
     for (const record of Object.values(saved)) {
       for (const [name, content] of Object.entries(record?.tags ?? {})) {
@@ -349,6 +359,25 @@ export interface LandingGap {
 }
 
 /**
+ * 算缺口时的附加口径。
+ *
+ * 两个用途，都源于同一条口径（用户 2026-11-11 定）：
+ * **核对「这个任务的标签齐不齐」要看它该产出什么，而不是看楼层正文里还剩什么。**
+ *
+ * 1. `requiredOfTask`：该任务**必达**的标签（抽取标签 − 豁免标签）。
+ *    有了它，缺口就只按「它本来就该产出、却一个都没落到暂存区」来算，
+ *    不再被 `textTagNames`（模板里写了哪些 `{{标签}}`）牵着走 ——
+ *    很多标签只写世界书、根本不进正文，按正文算必然误判。
+ * 2. `exemptOfTask`：该任务哪些标签豁免。必达清单没给时作为兜底口径。
+ */
+export interface LandingGapOptions {
+  /** 该任务**必达**的标签名单（小写、已去重）。给了就以它为准。 */
+  requiredOfTask?: (taskId: string) => ReadonlySet<string> | null | undefined;
+  /** 该任务哪些标签是豁免的（小写、已去重）；必达清单没给时用它兜底。 */
+  exemptOfTask?: (taskId: string) => ReadonlySet<string> | null | undefined;
+}
+
+/**
  * 算出一版成果相对「它刚跑完时」少了哪些标签。
  *
  * 用户能删的就是面板上那些标签块；删完之后这一版就不完整了，
@@ -358,7 +387,11 @@ export interface LandingGap {
  * `presentTags` 传的是**这一版正文里现在还剩的标签名**：
  * 由调用方用 `splitPlotMessage` 拆出来，这一层不碰文本格式。
  */
-export function landingGap(landing: StashLanding, presentTags: Iterable<string>): LandingGap {
+export function landingGap(
+  landing: StashLanding,
+  presentTags: Iterable<string>,
+  options?: LandingGapOptions,
+): LandingGap {
   const saved = landing.taskTags;
   if (!saved || typeof saved !== 'object') return { tags: [], taskIds: [] };
 
@@ -367,8 +400,9 @@ export function landingGap(landing: StashLanding, presentTags: Iterable<string>)
     if (typeof name === 'string' && name) present.add(name.toLowerCase());
   }
 
-  // 新版账本记了「本该进正文」的清单；老账没有，就退回「任务抽到的全部标签」。
-  // 老账还要排除 injectOnly —— 那些标签本来就不进正文，不该被算成缺口。
+  // 「本该进正文」的清单只在没有必达清单时兜底用。
+  // 注意它回答的是「模板里写了多少个 {{标签}}」，不是「这个任务该产出什么」——
+  // 很多标签只写世界书、根本不进正文，拿它当核对依据必然误判（2026-11-11 用户指出）。
   const expected = Array.isArray(landing.textTagNames)
     ? new Set(landing.textTagNames.filter((name) => typeof name === 'string' && name).map((name) => name.toLowerCase()))
     : null;
@@ -378,12 +412,27 @@ export function landingGap(landing: StashLanding, presentTags: Iterable<string>)
   for (const [taskId, entry] of Object.entries(saved)) {
     if (!taskId || !entry || typeof entry !== 'object') continue;
     const injectOnly = new Set((entry.injectOnly || []).map((name) => String(name).toLowerCase()));
-    const names = Object.keys(entry.tags || {}).filter((name) => {
-      if (!name) return false;
-      const lower = name.toLowerCase();
-      if (expected) return expected.has(lower);
-      return !injectOnly.has(lower);
-    });
+    const required = options?.requiredOfTask?.(taskId);
+    const exempt = options?.exemptOfTask?.(taskId);
+    const savedNames = Object.keys(entry.tags || {}).filter((name) => typeof name === 'string' && name !== '');
+
+    let names: string[];
+    if (required) {
+      // 主口径（用户 2026-11-11 定）：**必达标签 = 抽取标签 − 豁免标签**。
+      // 逐个查它在暂存区里有没有实物：缺了才算缺口，齐了就不该重跑。
+      // 这样「一个标签都没回传」的任务会整条被算成缺口（它必然 != 齐全），
+      // 而「只差豁免标签」的任务不受影响。
+      names = [...required];
+    } else {
+      names = savedNames.filter((name) => {
+        const lower = name.toLowerCase();
+        // 豁免标签不要求每轮回传：缺了不算缺口，也就不该把产出它的任务退回去重跑。
+        if (exempt && exempt.has(lower)) return false;
+        if (expected) return expected.has(lower);
+        return !injectOnly.has(lower);
+      });
+    }
+
     const missing = names.filter((name) => !present.has(name.toLowerCase()));
     if (missing.length === 0) continue;
     taskIds.push(taskId);
@@ -530,6 +579,88 @@ export function activeLanding(entry: StashEntry): StashLanding | null {
   const picked = entry.landings.find(l => l.id === entry.activeLandingId);
   if (picked) return picked;
   return entry.landings.length ? entry.landings[entry.landings.length - 1] : null;
+}
+
+/**
+ * 把两组「任务 id → 标签」的记录并起来。同名标签后者覆盖前者，injectOnly 取并集。
+ *
+ * 为什么单独抽出来：taskTags 是这一版自己的产出，carriedTags 是从上一层继承来的
+ * 老标签；读历史投影时两者要按同一个形状合并，写继承快照时又要按同样的规则算差集。
+ */
+export function mergeTaskTagRecords(
+  left: Record<string, WorkingTaskTags> | null | undefined,
+  right: Record<string, WorkingTaskTags> | null | undefined,
+): Record<string, WorkingTaskTags> {
+  const out: Record<string, WorkingTaskTags> = {};
+  for (const source of [left, right]) {
+    if (!source || typeof source !== 'object') continue;
+    for (const [taskId, record] of Object.entries(source)) {
+      if (!taskId || !record || typeof record !== 'object') continue;
+      const tags: Record<string, string> = {};
+      for (const [name, content] of Object.entries(record.tags ?? {})) {
+        if (typeof content !== 'string') continue;
+        tags[name] = content;
+      }
+      const injectOnly = Array.isArray(record.injectOnly)
+        ? record.injectOnly.filter((name): name is string => typeof name === 'string' && name !== '')
+        : [];
+      const prev = out[taskId];
+      const mergedInject = [...(prev?.injectOnly ?? [])];
+      for (const name of injectOnly) if (!mergedInject.includes(name)) mergedInject.push(name);
+      out[taskId] = { tags: { ...(prev?.tags ?? {}), ...tags }, injectOnly: mergedInject };
+    }
+  }
+  return out;
+}
+
+/** 一版成果的完整标签记录：从上一层继承的缺失标签 + 本版产出（本版同名标签优先）。 */
+export function taskTagRecordsOfLanding(landing: StashLanding | null | undefined): Record<string, WorkingTaskTags> {
+  if (!landing) return {};
+  return mergeTaskTagRecords(landing.carriedTags, landing.taskTags);
+}
+
+/** 一封楼层账的完整标签记录：优先读当前成果，没成果时退回工作区里累计的标签。 */
+export function taskTagRecordsOfEntry(entry: StashEntry | null | undefined): Record<string, WorkingTaskTags> {
+  if (!entry) return {};
+  const landing = activeLanding(entry);
+  if (landing) return taskTagRecordsOfLanding(landing);
+  return mergeTaskTagRecords(entry.working?.taskTags, undefined);
+}
+
+/**
+ * 新一版成果落盘时，从「当前楼层之前最近的一封账」里挑出本版没覆盖的标签，做成继承快照。
+ *
+ * 只继承当前版本没有的标签名：本版重写了某个标签就以本版为准，不能被旧内容盖回去。
+ * 空内容不继承（空值本来就不会被 collectStashTagMap 收进投影，继承了也没用）。
+ * 带了 liveTaskIds 时只继承「当前预设里还在的任务」：任务被删掉后，旧标签不能靠这条
+ * 滚动带一直传下去，否则删了任务还会往提示词里续它的旧内容。
+ */
+export function carryMissingTaskTags(
+  previous: StashEntry | null | undefined,
+  current: Record<string, WorkingTaskTags> | null | undefined,
+  liveTaskIds?: ReadonlySet<string>,
+): Record<string, WorkingTaskTags> {
+  const previousRecords = taskTagRecordsOfEntry(previous);
+  const present = new Set<string>();
+  for (const record of Object.values(current ?? {})) {
+    for (const name of Object.keys(record?.tags ?? {})) if (name) present.add(name);
+  }
+  const carried: Record<string, WorkingTaskTags> = {};
+  for (const [taskId, record] of Object.entries(previousRecords)) {
+    if (liveTaskIds && !liveTaskIds.has(taskId)) continue;
+    const tags: Record<string, string> = {};
+    for (const [name, content] of Object.entries(record.tags ?? {})) {
+      if (!name || present.has(name)) continue;
+      if (typeof content !== 'string' || content.trim() === '') continue;
+      tags[name] = content;
+    }
+    if (Object.keys(tags).length === 0) continue;
+    carried[taskId] = {
+      tags,
+      injectOnly: (record.injectOnly ?? []).filter(name => Object.prototype.hasOwnProperty.call(tags, name)),
+    };
+  }
+  return carried;
 }
 
 function unique(list: string[]): string[] {

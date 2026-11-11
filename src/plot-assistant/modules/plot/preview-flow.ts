@@ -38,7 +38,7 @@ import { selectTasksForFloor } from './eng/schedule';
 import { anchorNameOf, readAnchorGap, type AnchorFloor } from './floor-anchor';
 import { buildTagMap } from './eng/tags';
 import { collectKnownTagNames, tagsNeedingFullRefresh } from './eng/tag-diff';
-import { buildPlotWorldbookTexts } from './data/worldbook-hits';
+import { resolvePlotWorldbook } from './data/tavern-worldbook-scan';
 import { resolveChatStateStore } from './data/chat-vars';
 import { resolveChatKey } from './chat-key';
 import { attachLandingsToChat, collectStashTagMap } from './stash-model';
@@ -144,12 +144,14 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
     worldbookContent: pickSummaryIndexEntry(entriesByBook as never, bookNames),
   });
 
-  const worldbook = buildPlotWorldbookTexts({
+  // 预览必须跟真跑走同一条取数链（酒馆原生激活），否则两边会对不上。
+  const worldbook = await resolvePlotWorldbook({
     bookNames,
-    entriesByBook: entriesByBook as never,
-    baseScanText: [recentText, userText].filter(Boolean).join('\n'),
-    // 预览必须跟真跑一样认条目勾选，否则用户会照着预览放行、实际生成时却少几条
+    entriesByBook,
     enabledEntries: plotSettings.worldbookEntries,
+    rawChat,
+    userText,
+    baseScanText: [recentText, userText].filter(Boolean).join('\n'),
   });
 
   const identity = readRoundIdentity();

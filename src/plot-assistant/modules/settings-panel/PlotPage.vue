@@ -41,6 +41,7 @@ import { buildDeepSeekTemplate } from '../plot/api-body';
 import { readAcuApiPresets } from '../plot/data/acu-apis-io';
 import { readAcuPlotFlag } from '../plot/data/acu-plot-flag';
 import { migrateQrfToStash, migrateStashToQrf } from '../plot/stash-migrate';
+import { readArmedTaskIds, setArmedTaskIds } from '../plot/manual-arm';
 import { saveSettings } from '../settings';
 import { pageQuery, pageToastr } from '../tavern';
 import {
@@ -137,7 +138,11 @@ defineExpose({ draft, applyEditor, isDirtyNow, discardDraft, markSaved, validati
  * 不然每敲一个字符就写一次盘。
  */
 function commitPlot(): void {
-  saveSettings(props.ctx, { plot: klona(draft) });
+  if (saveSettings(props.ctx, { plot: klona(draft) })) {
+    // 导入预设会一次改一批任务；保存成功后要让楼层下的手动按钮立即重排，
+    // 不用等用户再点一次设置面板的保存或换角色卡（2026-11-11 用户实测反馈）。
+    props.ctx.onSettingsSaved?.();
+  }
 }
 
 
@@ -227,8 +232,27 @@ refreshPresets();
 
 /** 换预设时立刻重读任务表，不用再点一次刷新。 */
 function pickPreset(name: string): void {
+  if (draft.presetName !== name) clearArmedForOtherPresets(name);
   draft.presetName = name;
   refreshPresets();
+}
+
+/** 预约锚点名带预设名前缀；换预设时旧前缀的预约就是死数据，直接清掉。 */
+function clearArmedForOtherPresets(nextName: string): void {
+  const armed = readArmedTaskIds();
+  if (armed.length === 0) return;
+  const prefix = `${nextName}::`;
+  const next = armed.filter((id) => id.startsWith(prefix));
+  if (next.length !== armed.length) setArmedTaskIds(next);
+}
+
+/** 删预设 / 改名时清掉它名下的全部预约。 */
+function clearArmedOfPreset(name: string): void {
+  const armed = readArmedTaskIds();
+  if (armed.length === 0) return;
+  const prefix = `${name}::`;
+  const next = armed.filter((id) => !id.startsWith(prefix));
+  if (next.length !== armed.length) setArmedTaskIds(next);
 }
 
 // ——— 本地预设库 ———
@@ -268,6 +292,7 @@ function importPresetsFromAcu(): void {
 
 /** 删掉一份本地副本。删的正好是当前选中的，就把选择也清掉，免得指向不存在的东西。 */
 function dropPreset(name: string): void {
+  clearArmedOfPreset(name);
   draft.presets = draft.presets.filter((preset) => preset.name !== name);
   if (draft.presetName === name) {
     draft.presetName = '';
@@ -301,6 +326,7 @@ function createPreset(): void {
   const name = uniquePresetName(UI.plot.presetActionNewBase);
   const merged = mergeStoredPresets(draft.presets, [newPresetData(name)], { keepLocal: false, source: 'local' });
   draft.presets = merged.presets;
+  if (draft.presetName !== name) clearArmedForOtherPresets(name);
   draft.presetName = name;
   presetNote.value = UI.plot.presetCreated(name);
 }
@@ -317,6 +343,7 @@ function duplicatePreset(): void {
     source: 'local',
   });
   draft.presets = merged.presets;
+  if (draft.presetName !== name) clearArmedForOtherPresets(name);
   draft.presetName = name;
   presetNote.value = UI.plot.presetCreated(name);
 }
@@ -744,9 +771,11 @@ function applyEditor(): boolean {
     return false;
   }
 
+  const oldName = editorOrigin.value;
   const index = draft.presets.indexOf(stored);
   draft.presets[index] = { ...stored, name: nextName, data };
-  if (draft.presetName === editorOrigin.value) draft.presetName = nextName;
+  if (oldName !== nextName) clearArmedOfPreset(oldName);
+  if (draft.presetName === oldName) draft.presetName = nextName;
 
   const warns = issues.filter((issue) => issue.level === 'warn');
   const applied = UI.plot.presetEditApplied(describeStoredPresetSize(size));

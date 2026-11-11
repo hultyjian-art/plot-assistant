@@ -268,13 +268,28 @@ function ensureTableBodyNewline(content: string): string {
 }
 
 /**
- * 把一段完整回传里「开标签后紧跟表格」的地方统一补一个换行。
+ * 内容紧贴闭标签时，把闭标签单独挪到一行。
+ *
+ * 只处理「跨行块」：闭标签所在行之前已经存在换行（开标签另有其行、内容分了多行），
+ * 最后一行内容才会紧贴 `</tag>` —— 表格 / 列表类标签的 `| 值 |</tag>` 就是这么来的。
+ * 单行短标签（`<a>内容</a>`）不动：它本来就一行到尾，补换行反而把短标签拆开，
+ * 也会挪动既有回传的字节；换行后紧跟开标签（指令另起一行、标签仍是一行到尾）也不动。
+ * 闭标签前已经是换行、或闭标签已在行首时都不动，不重复补。
+ * 标签名沿用 [A-Za-z_][\w-]*（与其余规则一致，中文标签名不在规整范围）。
+ */
+function ensureClosingTagNewline(text: string): string {
+  return text.replace(/(\n)(?![ \t]*<[A-Za-z_][\w-]*>)([^\n]*\S)(<\/[A-Za-z_][\w-]*>)/g, '$1$2\n$3');
+}
+
+/**
+ * 把一段完整回传里「开标签后紧跟表格」的地方统一补一个换行，
+ * 并让「内容紧贴闭标签」的跨行块把闭标签独占一行。
  *
  * 用于兜底正文（没有聚合标签、直接把任务原文拼进 <plot> 的那条路）；
- * 只动开标签与表格之间，不动标签内部其它换行，也不改标签名。
+ * 只补这两处换行，不动标签内部其它换行，也不改标签名。
  */
 export function normalizeTagBlockNewlines(text: string): string {
-  return String(text ?? '').replace(/(<([A-Za-z_][\w-]*)>)(?=[ \t]*\|)/g, '$1\n');
+  return ensureClosingTagNewline(String(text ?? '').replace(/(<([A-Za-z_][\w-]*)>)(?=[ \t]*\|)/g, '$1\n'));
 }
 
 /**
@@ -286,16 +301,21 @@ export function normalizeTagBlockNewlines(text: string): string {
  * 闭-开（相互独立的标签并排）让右边那个换到下一行。
  * 同一对的空标签（`<a></a>`）不是两个独立标签，不动；标签内部文字、
  * 已有换行也不动，不会重复补。
+ *
+ * 第四类（用户 2026-11-11）：跨行块的内容紧贴闭标签（`| 值 |</tag>`），
+ * 让闭标签独占一行；由 ensureClosingTagNewline 统一处理，单行短标签不受影响。
  */
 export function normalizeAdjacentTagNewlines(text: string): string {
   const source = String(text ?? '');
-  return source
-    // 开标签紧贴开标签：靠左的是父（<父><子>…</子></父>）
-    .replace(/(<[A-Za-z_][\w-]*>)(?=<[A-Za-z_][\w-]*>)/g, '$1\n')
-    // 闭标签紧贴闭标签：靠右的是父
-    .replace(/(<\/[A-Za-z_][\w-]*>)(?=<\/[A-Za-z_][\w-]*>)/g, '$1\n')
-    // 相互独立的标签并排：右边那个换到下一行，让每个标签独占一行
-    .replace(/(<\/[A-Za-z_][\w-]*>)(?=<[A-Za-z_][\w-]*>)/g, '$1\n');
+  return ensureClosingTagNewline(
+    source
+      // 开标签紧贴开标签：靠左的是父（<父><子>…</子></父>）
+      .replace(/(<[A-Za-z_][\w-]*>)(?=<[A-Za-z_][\w-]*>)/g, '$1\n')
+      // 闭标签紧贴闭标签：靠右的是父
+      .replace(/(<\/[A-Za-z_][\w-]*>)(?=<\/[A-Za-z_][\w-]*>)/g, '$1\n')
+      // 相互独立的标签并排：右边那个换到下一行，让每个标签独占一行
+      .replace(/(<\/[A-Za-z_][\w-]*>)(?=<[A-Za-z_][\w-]*>)/g, '$1\n'),
+  );
 }
 
 /** 内容里有没有「非空白」的实质东西。 */

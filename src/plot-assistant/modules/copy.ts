@@ -294,7 +294,13 @@ export const UI = {
       '单独挑一条的话，这个任务的请求就走那一条；留空就用 API 页里选中的那条。想把重活分给好一点的接口，就靠这一格。',
     editorTaskMinLength: '最少字数',
     editorTaskEvery: '每几楼进行一次',
-    editorTaskEveryHint: '1 = 每条用户楼层都跑；填 3 = 每隔 3 条用户楼层跑一次。只数用户发的楼层（被隐藏的也算），AI 回复不算；删层重刷不新增楼层，所以不会误触发。',
+    editorTaskEveryHint: '1 = 每条用户楼层都跑；填 3 = 每隔 3 条用户楼层跑一次。只数用户发的楼层（被隐藏的也算），AI 回复不算；删层重刷不新增楼层，所以不会误触发。手动触发开启的任务不受间隔限制。',
+    editorTaskManual: '手动触发',
+    editorTaskManualHint: '开启后任务不再按每几楼自动跑，改为在聊天页面最新用户楼层的底部点按钮预约：点一下＝下一次用户输入时执行（按钮发光），再点＝取消。除非在这里关掉并保存，任务一直保持手动触发才进行。',
+    previewManualSkipped: (count: number): string => `另有 ${count} 个任务等待手动触发。`,
+    manualToastArmed: (name: string): string => `将在下一次用户输入时进行任务「${name}」`,
+    manualToastDisarmed: (name: string): string => `已取消任务「${name}」的预约`,
+    manualIdleReason: '等待手动触发',
     editorTaskTags: '抽取标签',
     editorTaskInject: '只留字段',
     editorTaskExempt: '豁免标签',
@@ -627,7 +633,10 @@ export const UI = {
     worldbookEntryPrimaryTag: '主书',
     worldbookEntryAdditionalTag: '附加',
     worldbookEntryBlockedHint:
-      '名字里带「规则 / 变量 / MVU / 状态 / 格式」这类词的条目、以及数据库脚本生成的条目，本来就不会进 $1（和上游一致），所以这里标出来。本脚本自己写进世界书的条目（plot_assistant- 开头）同样不进 $1，防止与任务里的 {{标签}} 重复。',
+      '名字里带这些词的条目会被自动排除：思维链、cot、MVU、mvu、变量、状态、Status、Rule、rule、检定、判断、叙事、文风、InitVar、格式。'
+    + '它们多半是给 MVU 变量框架和正则用的，AI 读了只会照着写代码；中文「规则」不在名单里，「王国规则总览」这类正经设定能正常进 $1，但英文 Rule / rule 仍会被排除。'
+    + '此外，大纲表与纪要索引有专用占位符、本脚本自己写进世界书的条目（plot_assistant- 开头）防止与任务里的 {{标签}} 重复，也都不进 $1，这里一并标出来。'
+    + '数据库脚本生成的条目会进 $1，但不会进 $9；给条目起名时避开上面那批词即可。',
     worldbookEntryReadError: (message: string) => `读条目失败：${message}`,
     // —— 世界书写入（把标签块写成条目；2026-11-07 批 36-38 用户定）——
     wbWriteSection: '世界书写入（标签块 → 条目）',
@@ -636,7 +645,7 @@ export const UI = {
     wbWriteSource: '写到哪本书',
     wbWriteFollow: '跟随角色卡',
     wbWriteManual: '手动选择',
-    wbWriteFollowHint: '写到当前角色卡绑定的世界书（主书 + 附加书，与 $1 的读端口径一致）。',
+    wbWriteFollowHint: '写到当前角色卡的主要知识书（只写这一本，附加知识书不写）。',
     wbWriteManualHint: '写到下面勾选的那几本书，可以是没绑到角色卡上的全局设定书。',
     wbWritePickHint: '勾哪几本，条目就写进哪几本。一本都不勾等于不写。',
     wbWriteSearch: '搜书名…',
@@ -781,6 +790,7 @@ export const UI = {
       { name: '抽取标签', desc: '这个任务负责产出哪些标签（如 recall、character_info）。回传里按 <标签名>…</标签名> 抽取；这里列出的标签必须全部回传，少一个就算这个任务失败。失败后按任务设置的重试上限重试，次数用尽仍缺就按任务失败处理：这一轮不注入，输入框保留原文，已回传的标签先存进暂存区。' },
       { name: '只进字段', desc: '写在这里的标签只存进数据、不写进最终注入正文——适合纯后台记录，不占正文 token。注意：它同样要完整回传，只是不进正文；少一个照样算任务失败。' },
       { name: '最短长度 / 重试上限', desc: '回传字数低于下限视为失败，按任务设置的重试上限重试；次数用尽仍失败则该任务判失败，这一轮不注入，原文退回输入框。' },
+      { name: '手动触发', desc: '开启后任务不再按每 N 楼自动跑。聊天页面最新用户楼层的底部出现带任务名的按钮：点一下＝预约在下一次用户输入时执行（按钮发光，再点＝取消）；跑完自动回到待命。除非在任务里关掉手动触发并保存，任务一直保持手动才跑。停用任务不显示按钮，已预约的停用时预约清除。' },
       { name: '每 N 楼（触发周期）', desc: '不填=每条用户楼层都跑；填 N=每隔 N 条用户楼层跑一次。只数用户发的楼层（被隐藏的也算），AI 回复不算。每个任务自己记锚点：任务成功跑完，就在那条用户楼层上单独打一个记号；下次发送时从最新楼层往回数，隔够 N 条才再跑。' },
       { name: '单独 API', desc: '这个任务可以指定走设置里哪一条 API（不填用「当前 API」）。适合把便宜模型留给轻任务、贵模型留给重任务。' },
       { name: '任务说明', desc: '纯备注，给自己看的，不进提示词。' },

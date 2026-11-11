@@ -36,6 +36,15 @@ export const WB_WRITE_BAD_KEY = 'reroll_plot_wb_write_bad';
 export const STASH_BAD_KEY = 'reroll_plot_stash_bad';
 export const LOG_BAD_KEY = 'reroll_plot_log_bad';
 
+/**
+ * 「手动触发」的预约表：存在聊天变量里，值是被预约任务的锚点名数组
+ * （锚点名 = 预设名::任务id，见 plot/floor-anchor.ts）。按聊天分家，
+ * 切聊天自然换一份账；停用、删任务、改预设名留下的死条目在每轮发送前清掉。
+ */
+export const ARMED_KEY = 'reroll_plot_manual_armed';
+/** 预约表读坏了的原文往这里存一份，免得用户的数据被我们悄悄丢掉。 */
+export const ARMED_BAD_KEY = 'reroll_plot_manual_armed_bad';
+
 /** 变量表的读写口。真实环境是 `getVariables` / `replaceVariables`，测试里换成假的。 */
 export interface VariableStorage {
   readAll: () => Record<string, any>;
@@ -85,6 +94,21 @@ export interface ChatStateStore {
 }
 
 /**
+ * `createChatStateStore` 实际返回的是这个更全的版本（多带一份「手动触发」预约表）。
+ *
+ * 为什么不把两个新方法直接加进 `ChatStateStore`：`tools/plot-parity/log-flow-test.ts`
+ * 里有一份手写的精简假实现（只列了上面那几个方法），加必需方法会让它在
+ * `--strict` 下编译不过，而那份测试文件不在这次允许改动的范围里。
+ * 用子接口扩展最省事：既有调用方拿到的仍是父类型 `ChatStateStore`，完全兼容。
+ */
+export interface ArmedChatStateStore extends ChatStateStore {
+  /** 读预约表：非数组 = 读坏，原文备份后当空表；数组里只留字符串条目。 */
+  loadArmed: () => string[];
+  /** 整表写回（不是追加）。 */
+  saveArmed: (ids: string[]) => void;
+}
+
+/**
  * 窄校验：只要结构对得上就认，不逐字段挑刺。
  *
  * 为什么不严格校验每个 landing：那是用户能手改的数据，多一个字段就该救活而不是判死。
@@ -112,7 +136,7 @@ function looksLikeWbWriteLedger(value: unknown): value is WbWriteLedger {
   return isPlainObject(value.contents);
 }
 
-export function createChatStateStore(storage: VariableStorage): ChatStateStore {
+export function createChatStateStore(storage: VariableStorage): ArmedChatStateStore {
   /** 每次保存都走这同一道口：读出全部 → 只改我们的键 → 整份写回。 */
   const writeOwn = (patch: Record<string, any>): void => {
     const all = storage.readAll() || {};
@@ -191,6 +215,24 @@ export function createChatStateStore(storage: VariableStorage): ChatStateStore {
     };
   };
 
+  /**
+   * 「手动触发」预约表：只认数组，逐条只留字符串。
+   * 非数组或混进脏条目时，先把原文备份到 `_bad` 键再给干净的表 ——
+   * 顺序反了就等于把用户的数据抹了（与暂存账本同一条规矩）。
+   */
+  const loadArmed = (): string[] => {
+    const all = storage.readAll() || {};
+    const raw = all[ARMED_KEY];
+    if (raw === undefined || raw === null) return [];
+    if (!Array.isArray(raw)) {
+      writeOwn({ [ARMED_BAD_KEY]: raw });
+      return [];
+    }
+    const ids = raw.filter((id): id is string => typeof id === 'string');
+    if (ids.length !== raw.length) writeOwn({ [ARMED_BAD_KEY]: raw });
+    return ids;
+  };
+
   return {
     loadStash,
     saveStash: (stash) => writeOwn({ [STASH_KEY]: stash }),
@@ -198,6 +240,8 @@ export function createChatStateStore(storage: VariableStorage): ChatStateStore {
     saveLog: (log) => writeOwn({ [LOG_KEY]: log }),
     loadWbWriteLedger,
     saveWbWriteLedger: (ledger) => writeOwn({ [WB_WRITE_KEY]: ledger }),
+    loadArmed,
+    saveArmed: (ids: string[]) => writeOwn({ [ARMED_KEY]: ids }),
     clearOwnKeys: () => {
       const all = storage.readAll() || {};
       const next = { ...all };
@@ -207,6 +251,8 @@ export function createChatStateStore(storage: VariableStorage): ChatStateStore {
       delete next[LOG_BAD_KEY];
       delete next[WB_WRITE_KEY];
       delete next[WB_WRITE_BAD_KEY];
+      delete next[ARMED_KEY];
+      delete next[ARMED_BAD_KEY];
       storage.writeAll(next);
     },
   };

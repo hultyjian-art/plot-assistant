@@ -40,6 +40,7 @@ function isRegenerateLabel(text: string): boolean {
 
 /**
  * 原生重刷：三条路径按可靠性从高到低依次尝试。
+ * 返回是否真的把重刷下达出去了。
  */
 export async function runNativeRefresh(ctx: RerushContext): Promise<boolean> {
   const p$ = pageQuery();

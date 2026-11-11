@@ -205,14 +205,15 @@ export function resolvePromptGroup(source: Loose | null): PlotPromptSegment[] {
 const DEFAULT_MAX_RETRIES = 3;
 
 /**
- * 读任务上的触发周期。
+ * 读任务上的触发周期与手动触发标记。
  *
- * 只在源数据（或兜底任务）真的写了 `schedule.everyRounds` / `schedule.lastRound` 时返回对象，
- * 否则返回 `null` —— 让调用方**不写这个键**。理由见 `PlotTask.schedule` 的注释：
- * 上游数据没有它，凭空多一个空对象会让逐字节比对的用例全红。
+ * 只在源数据（或兜底任务）真的写了 `schedule.everyRounds` / `schedule.lastRound`
+ * / `schedule.manual: true` 时返回对象，否则返回 `null` —— 让调用方**不写这个键**。
+ * 理由见 `PlotTask.schedule` 的注释：上游数据没有它，凭空多一个空对象会让逐字节比对的用例全红。
  *
- * 脏值一律丢弃（`'abc'`、`0`、`-3`）而不是落成 0/NaN：周期是「每几楼进行一次」，
- * 落成 0 会让 `shouldRunTask` 每轮都判成到期，落成 NaN 会让它永远判成没到期。
+ * 脏值一律丢弃（`'abc'`、`0`、`-3`、`manual: 1`、`manual: "true"`）而不是落成 0/NaN/半成品：
+ * 周期是「每几楼进行一次」，落成 0 会让 `shouldRunTask` 每轮都判成到期，落成 NaN 会让它永远判成没到期；
+ * 手动标记只认严格 `true`，是面板「只写 true、关闭=删键」那套落盘纪律的入口把关。
  */
 function normalizeTaskApiName(primary: unknown, fallback: unknown): string {
   const pick = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
@@ -231,10 +232,16 @@ function normalizeTaskSchedule(primary: unknown, fallback: unknown): TaskSchedul
   };
   const everyRounds = pick('everyRounds');
   const lastRound = pick('lastRound');
-  if (everyRounds === undefined && lastRound === undefined) return null;
+  // 手动触发标记（批68）：只认真写的 `true`，1 / "true" / false 这些脏值一律丢弃，
+  // 与上面两个数字字段同一家风；源数据没写就不带这个键，免得改掉旧预设的逐字节形状。
+  const manualRaw =
+    source && Object.prototype.hasOwnProperty.call(source, 'manual') ? source.manual : backup?.manual;
+  const manual = manualRaw === true;
+  if (everyRounds === undefined && lastRound === undefined && !manual) return null;
   return {
     ...(everyRounds === undefined ? {} : { everyRounds }),
     ...(lastRound === undefined ? {} : { lastRound }),
+    ...(manual ? { manual: true } : {}),
   };
 }
 

@@ -320,9 +320,36 @@ const ledgerRows = computed<{ name: string; content: string }[]>(() => {
   }
   return rows;
 });
+
+/**
+ * 继承自之前楼层的标签（可编辑，用户 2026-11-11 拍板）。
+ *
+ * 单独一组、和本层账本行分开；编辑过的行由 save() 按「本层产出」写进该版
+ * taskTags（见 editLanding 的 carriedEdits），carriedTags 是继承历史快照，原样不动。
+ * 本层 taskTags 里已有的同名标签不再重复显示（用户 m00155：要继承的只是老楼层
+ * 有、而新楼层没有的）；正文里已有的同名标签也跳过，避免两处都能改同一个标签。
+ */
+const carriedRows = computed<{ name: string; content: string }[]>(() => {
+  const body = new Set(bodyTagNames.value.map((name) => name.toLowerCase()));
+  const rows: { name: string; content: string }[] = [];
+  const seen = new Set<string>();
+  for (const record of Object.values(currentLanding.value?.taskTags ?? {})) {
+    for (const name of Object.keys(record?.tags ?? {})) seen.add(name);
+  }
+  for (const record of Object.values(currentLanding.value?.carriedTags ?? {})) {
+    for (const [name, content] of Object.entries(record?.tags ?? {})) {
+      if (typeof content !== 'string' || body.has(name.toLowerCase()) || seen.has(name)) continue;
+      seen.add(name);
+      rows.push({ name, content });
+    }
+  }
+  return rows;
+});
 const ledgerDraft = ref<Record<string, string>>({});
+const carriedDraft = ref<Record<string, string>>({});
 const ledgerDirty = computed(() => ledgerRows.value.some((row) => (ledgerDraft.value[row.name] ?? row.content) !== row.content));
-const dirty = computed(() => draftText.value !== savedText.value || ledgerDirty.value);
+const carriedDirty = computed(() => carriedRows.value.some((row) => (carriedDraft.value[row.name] ?? row.content) !== row.content));
+const dirty = computed(() => draftText.value !== savedText.value || ledgerDirty.value || carriedDirty.value);
 
 /** 正文里实际出现的标签名 —— 判断「缺口」只认它。 */
 const bodyTagNames = computed<string[]>(() => scanTagBlocks(draftText.value).map((block) => block.tag));
@@ -403,15 +430,27 @@ function openViewer(entry: StashEntry, landing: StashLanding): void {
   openLandingId.value = landing.id;
   draftText.value = landing.finalText;
   // 账本里那些不进正文的标签也要能改：打开这一版时按标签名把内容装进草稿。
+  // 继承标签同样装进草稿（用户 2026-11-11 拍板可编辑）：只有被改过的行会在保存时
+  // 按「本层产出」落地，没改过的行不产生任何写入，carriedTags 保持原样。
   const body = new Set(scanTagBlocks(landing.finalText).map((block) => block.tag.toLowerCase()));
   const draft: Record<string, string> = {};
+  const carried: Record<string, string> = {};
+  const taskTagNames = new Set<string>();
   for (const record of Object.values(landing.taskTags ?? {})) {
     for (const [name, content] of Object.entries(record?.tags ?? {})) {
+      taskTagNames.add(name);
       if (typeof content !== 'string' || body.has(name.toLowerCase())) continue;
       draft[name] = content;
     }
   }
+  for (const record of Object.values(landing.carriedTags ?? {})) {
+    for (const [name, content] of Object.entries(record?.tags ?? {})) {
+      if (typeof content !== 'string' || body.has(name.toLowerCase()) || taskTagNames.has(name)) continue;
+      carried[name] = content;
+    }
+  }
   ledgerDraft.value = draft;
+  carriedDraft.value = carried;
   savedText.value = landing.finalText;
   askDiscard.value = false;
   askDelete.value = false;
@@ -508,12 +547,30 @@ async function save(): Promise<void> {
   if (!entry || !landing || !stash.value || busy.value) return;
   const wasInUse = inUse(entry, landing);
   try {
+    // 只把「实际编辑过」的继承标签传给落盘：没改过的行不进 taskTags、不进同步文本，
+    // carriedTags 保持原样（用户 2026-11-11 拍板：继承标签可编辑，编辑后算本层产出）。
+    // 落盘会改 stash.value，ledgerRows / carriedRows 随即重算（编辑过的行会从继承分组
+    // 移到账本行），所以同步文本要用的两份行在落盘前先取快照，口径才不漂移。
+    const ledgerRowsSnapshot = ledgerRows.value.map((row) => ({
+      name: row.name,
+      content: ledgerDraft.value[row.name] ?? row.content,
+    }));
+    const carriedEdits: Record<string, string> = {};
+    const editedCarriedRows: { name: string; content: string }[] = [];
+    for (const row of carriedRows.value) {
+      const content = carriedDraft.value[row.name] ?? row.content;
+      if (content !== row.content) {
+        carriedEdits[row.name] = content;
+        editedCarriedRows.push({ name: row.name, content });
+      }
+    }
     const next = editLanding({
       stash: stash.value,
       floorId: entry.floorId,
       landingId: landing.id,
       finalText: draftText.value,
       ledgerEdits: { ...ledgerDraft.value },
+      carriedEdits,
       now: Date.now(),
     });
     if (!next) {
@@ -538,8 +595,14 @@ async function save(): Promise<void> {
     readFloorTexts(stash.value);
     // 批 45：改的是使用中的那版且楼层已跟上，世界书条目也跟着这份新内容走。
     // 只在这一步同步 —— 楼层写失败时（上面 return 了）世界书保持旧内容，两边不说两样话。
-    // 账本里编辑过的标签也要并进世界书同步的文本，否则世界书条目还是旧内容。
-    syncWorldbook([draftText.value, ...ledgerRows.value.map((row) => `<${row.name}>${ledgerDraft.value[row.name] ?? row.content}</${row.name}>`)].join('\n\n'));
+    // 账本标签、以及编辑过的继承标签，都要并进世界书同步的文本，否则条目还是旧内容。
+    // 写入侧是「这一版有的标签覆盖账本同名内容，其余标签不动」（批 45 拍板），
+    // 这里只拼编辑过的继承行，没编辑的不产生多余写入（用户核实过重放同名内容幂等无害）。
+    syncWorldbook([
+      draftText.value,
+      ...ledgerRowsSnapshot.map((row) => `<${row.name}>${row.content}</${row.name}>`),
+      ...editedCarriedRows.map((row) => `<${row.name}>${row.content}</${row.name}>`),
+    ].join('\n\n'));
     flash(t.stashSavedSynced(entry.floorId));
   } catch (error) {
     busy.value = false;
@@ -1087,6 +1150,21 @@ function replaceAllInDraft(): void {
             <span class="acu-stash-tagrow__name">{{ row.name }}</span>
             <textarea
               v-model="ledgerDraft[row.name]"
+              class="acu-input acu-stash-dialog__text"
+              style="min-height: 72px"
+              spellcheck="false"
+              :disabled="plotRunning"
+            ></textarea>
+          </div>
+        </div>
+
+        <div v-if="carriedRows.length > 0" class="acu-stash-dialog__tags">
+          <span class="acu-stash-dialog__label">继承自之前楼层（可编辑）</span>
+          <p class="acu-notes">这些标签是从更早的楼层继承来的。改动保存后会算作这一层的产出，写进世界书；没改的保持原样。</p>
+          <div v-for="row in carriedRows" :key="row.name" class="acu-stash-tagrow">
+            <span class="acu-stash-tagrow__name">{{ row.name }}</span>
+            <textarea
+              v-model="carriedDraft[row.name]"
               class="acu-input acu-stash-dialog__text"
               style="min-height: 72px"
               spellcheck="false"

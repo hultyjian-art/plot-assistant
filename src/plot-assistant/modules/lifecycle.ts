@@ -17,6 +17,13 @@ import { pageQuery, tavernGlobal, helperGlobal, pageToastr } from './tavern';
 import { MSG, TAG } from './copy';
 import { mountFloorSync } from './plot/floor-sync';
 import { enqueueWorldbookCheck } from './plot/worldbook-write';
+import { setCachedActivatedEntries } from './plot/data/tavern-worldbook-scan';
+import { mountManualButtons, type ManualTaskView } from './plot/manual-buttons';
+import { describePresetProblem, readPlotPreset } from './plot/data/acu-presets';
+import { findStoredPreset } from './plot/data/preset-store';
+import { importPresetConfig } from './plot/eng/preset-import';
+import { presetImportOptions } from './plot/preset-options';
+import { anchorNameOf } from './plot/floor-anchor';
 import type { RerushContext, TavernLike } from './types';
 
 /** 装载：抢占实例位、挂监听、装按钮与手势，退场时回收。 */
@@ -53,16 +60,46 @@ export function bootstrap(ctx: RerushContext): void {
   // 剧情推进要在「用户点发送」这一刻插进去跑：手势重刷只是其中一条路，
   // 不开这层的话，正常点发送的正文会直接出去，开关等于装饰（2026-11-02 用户实测）。
   const detachPlotGate = mountPlotSendGate(ctx);
+  // 手动触发按钮：楼层底部一排开关，点亮后下一次发送才跑对应任务。
+  // 不在这里按总开关决定挂不挂——用户可能进设置再打开；由 isEnabled 在每次渲染时判断，
+  // 关闭时只把按钮条摘掉，不动预约表（预约归任务停用/删除时清理）。
+  const manualButtons = mountManualButtons({
+    listManualTasks: () => listManualTasks(ctx),
+    isEnabled: () => ctx.settings.plot.enabled,
+  });
+  // 保存设置后立即重排手动按钮：任务从「自动」切到「手动」、或取消手动时，
+  // 不需要等聊天事件或换角色卡才刷新（2026-11-11 用户实测反馈）。
+  // 先保留原来的 onSettingsSaved（重注册脚本按钮），再追加重排。
+  const settingsSavedBeforeManualButtons = ctx.onSettingsSaved;
+  ctx.onSettingsSaved = () => {
+    try {
+      settingsSavedBeforeManualButtons?.();
+    } finally {
+      manualButtons.refresh();
+    }
+  };
   // 用户在酒馆里手动改完楼层、点保存时，把改动同步回当前模式的存储（账本或 qrf 字段）。
   const detachFloorSync = mountFloorSync(ctx);
   // 世界书写入（2026-11-07 批 36/37）：脚本装载时对一次账 —— 酒馆初始加载时
   // chat_id_changed 不一定再发一次，靠这里兜住「上次切了聊天/角色卡、改了规则」的场景。
   enqueueWorldbookCheck(ctx);
+  // 原版 SillyTavern 没有「世界书预演」接口时，靠上一次生成的激活广播兜底。
+  // WORLD_INFO_ACTIVATED 只在「本轮至少激活一条」时才发，上一轮 0 激活会留着旧清单；
+  // WORLDINFO_SCAN_DONE 每轮都发（含空清单），用它兜住「清旧」这一下。
+  const offWorldInfoActivated = eventOn(tavern_events.WORLD_INFO_ACTIVATED, entries => {
+    setCachedActivatedEntries(entries);
+  });
+  const offWorldInfoScanDone = eventOn(tavern_events.WORLDINFO_SCAN_DONE, data => {
+    setCachedActivatedEntries(data?.activated?.entries);
+  });
   const detachGesture = ctx.state.detachListeners;
   ctx.state.detachListeners = () => {
     detachGesture?.();
     detachPlotGate();
+    manualButtons.dispose();
     detachFloorSync.stop();
+    offWorldInfoActivated.stop();
+    offWorldInfoScanDone.stop();
   };
 
   const p$ = pageQuery();
@@ -125,6 +162,34 @@ export function bootstrap(ctx: RerushContext): void {
   // 这一步是把"关掉旧脚本"真正做干净的关键：不清掉魔法棒入口与动效样式，
   // 新实例会以为入口已存在而跳过注册，你点的就成了旧实例留下的死入口。
   $(window).on('pagehide unload', teardown);
+}
+
+/**
+ * 取「启用且开了手动触发」的任务，供楼层按钮渲染。
+ *
+ * 读不到预设时**抛错**而不是回空表：空表在按钮模块里会被当成「这些任务都删了」并清空预约表，
+ * 一次临时的读取失败不该把用户点亮的预约抹掉。调用方会捕获并跳过本次渲染。
+ */
+function listManualTasks(ctx: RerushContext): ManualTaskView[] {
+  const plotSettings = ctx.settings.plot;
+  const wanted = plotSettings.presetName.trim();
+  if (wanted === '') throw new Error('还没选剧情推进预设');
+
+  const stored = findStoredPreset(plotSettings.presets, wanted);
+  let preset: Record<string, unknown>;
+  if (stored) {
+    preset = stored.data;
+  } else {
+    const outcome = readPlotPreset(wanted);
+    if (!outcome.ok) throw new Error(describePresetProblem(outcome));
+    preset = outcome.details as Record<string, unknown>;
+  }
+
+  const config = importPresetConfig(preset, presetImportOptions(plotSettings));
+  const presetKey = stored ? stored.name : config.name;
+  return config.tasks
+    .filter(task => task.enabled !== false && task.schedule?.manual === true)
+    .map(task => ({ id: task.id, name: task.name, anchorName: anchorNameOf(presetKey, task.id) }));
 }
 
 /**

@@ -169,7 +169,7 @@ const PlotZ = z.object({
       enabled: z.boolean(),
     }),
   ),
-  /** 条目写进哪本书：character = 角色卡绑定的（主书+附加书）；manual = 勾的那几本。 */
+  /** 条目写进哪本书：character = 角色卡的主要知识书（只写主书）；manual = 勾的那几本。 */
   worldbookWriteSource: z.enum(['character', 'manual']),
   /** 写入手动模式勾选的书名。 */
   worldbookWriteBooks: z.array(z.string()),
@@ -238,7 +238,7 @@ export const FALLBACK_SETTINGS: RerushSettings = {
     // 空表 = 每本书都全选
     worldbookEntries: {},
     // 世界书写入（2026-11-07）：默认没配规则 = 什么都不写，行为与加功能前一致；
-    // 目标书默认跟角色卡绑定走（与 `$1` 的读端口径一致）。
+    // 目标书默认跟角色卡走：只写主要知识书。
     worldbookWriteRules: [],
     worldbookWriteSource: 'character',
     worldbookWriteBooks: [],
@@ -275,12 +275,6 @@ function asFlag(value: unknown, fallback: boolean): boolean {
 function asDelay(value: unknown, fallback: number): number {
   const n = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(n) && n >= 10 ? Math.round(n) : fallback;
-}
-
-/** 计类型数字的规整：非数字、或小于该项下限的，一律退回默认值。 */
-function asCount(value: unknown, fallback: number, min: number): number {
-  const n = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(n) && n >= min ? Math.round(n) : fallback;
 }
 
 /**
@@ -359,9 +353,6 @@ function readCapture(source: unknown): CaptureSettings {
   return { fromAiFloor: asFlag(raw.fromAiFloor, FALLBACK_SETTINGS.capture.fromAiFloor) };
 }
 
-function asText(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
 
 /**
  * 世界书条目勾选表：`书名 → 允许注入的 uid 列表`。

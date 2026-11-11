@@ -56,6 +56,14 @@ export interface PlotRoundDeps {
    */
   gapOf?: (taskId: string) => number | null;
   /**
+   * 这一楼层被手动预约的任务 id 集合（见方案「任务手动触发」，批68）。
+   * 只影响标了 schedule.manual 的任务：在集合里就跑、不在就跳过并报「等待手动触发」。
+   *
+   * 不传 = 重刷 / 回填等流程：手动标记不生效，所有任务按原有周期判定，行为与此参数
+   * 存在之前完全一致。集合由调用方从聊天变量里读，这一层不碰存储。
+   */
+  armedTaskIds?: ReadonlySet<string>;
+  /**
    * 酒馆原生宏替换（`<user>` / `{{user}}` / `<char>` / `{{char}}` 等）。
    * 在任务 messages 和最终注入指令拼好之后调用；不传 = 不处理（纯函数测试保持原样）。
    */
@@ -101,6 +109,11 @@ export type PlotRoundRunOutcome =
       saveContent: string;
       /** 本轮跳过了哪些任务（断点续跑） */
       skippedTaskIds: string[];
+      /**
+       * 续跑路径里「发现已经完成」的任务 id（纯上报：面板要能区分「这轮没跑」
+       * 和「上轮已经跑过、这轮接着走」）。没有续跑快照时是空数组。
+       */
+      alreadyDone: string[];
       /** 本轮真正发出请求的任务（成功的那批）；账本按它记「上次跑过」。 */
       ranTaskIds: string[];
       /** 本轮因为「楼层间隔还没到 / 被停用」而跳过的任务，带上原因（面板/日志用）。 */
@@ -141,7 +154,7 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
   // 顺序反过来的话，一个「每 3 条用户楼层」的任务会被续跑先摘掉、被记成跑过 —— 它会越拖越久。
   //
   // 间隔由调用方从现存楼层里数好递进来（锚点在楼层 extra 里），这里只做纯策略判断。
-  const selection = selectTasksForFloor(resume.tasks, deps.gapOf ?? (() => null));
+  const selection = selectTasksForFloor(resume.tasks, deps.gapOf ?? (() => null), deps.armedTaskIds);
   const scheduledTasks = selection.due;
   const skippedBySchedule = selection.skipped.map(item => ({ taskId: item.id, reason: item.decision.reason }));
 
@@ -292,6 +305,9 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
     finalMessage,
     saveContent: outcome.saveContent,
     skippedTaskIds: resume.skippedTaskIds,
+    // 续跑里「上轮已经完成」的名单单独报一份（纯上报，不参与任何判定），
+    // 面板要拿它显示「这轮是接着上轮走」；与 skippedTaskIds 同值但用途不同。
+    alreadyDone: resume.skippedTaskIds,
     // 只有**真发出请求**的任务才记「这条楼层跑过」：失败的下轮要重试，
     // 但这一轮它已经占了一次调用，不该在「每 N 条用户楼层」上再记一次便宜。
     ranTaskIds: outcome.taskResults.map(result => result.taskId),

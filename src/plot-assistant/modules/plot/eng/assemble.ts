@@ -10,7 +10,7 @@
  *   - `extractInjectTags` 的标签即使模板里写了也不注入，只留在字段里
  *   - 一个标签都没抽到时退回任务原文，否则内容全丢
  */
-import { buildTagBlock, hasContent, lookupTag, normalizePositiveInteger, normalizeTagBlockNewlines, type TagMap } from './tags';
+import { buildTagBlock, hasContent, lookupTag, normalizeAdjacentTagNewlines, normalizePositiveInteger, normalizeTagBlockNewlines, type TagMap } from './tags';
 
 /** 一次任务跑完的回执。字段宽松到能直接接住 ACU 的形状。 */
 export interface PlotTaskResult {
@@ -143,7 +143,9 @@ export function buildFinalMessage(
         .replace(PLACEHOLDER_PATTERN, (_placeholder, tagName: string) => {
           const resolved = lookupTag(aggregatedTags, tagName);
           if (!hasContent(resolved.value)) return '';
-          return buildTagBlock(tagName, resolved.value);
+          // 聚合块拼完就规整（这条路此前零规整，闭标签会贴在表格行尾）；
+          // 只规整块本身，不碰指令文本与块之间的换行
+          return normalizeAdjacentTagNewlines(buildTagBlock(tagName, resolved.value));
         })
         .trim();
     }

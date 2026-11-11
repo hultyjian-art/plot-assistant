@@ -62,6 +62,15 @@ export function mountGestureWatch(ctx: RerushContext): void {
   let tapWindowTimer: number | null = null;
   let holdTimer: number | null = null;
   let holdFired = false;
+  /**
+   * 长按的时间窗口已经走完了（不管最后有没有派发动作）。
+   *
+   * 为什么要和 holdFired 分开：推进运行期长按会被派发层拦下，holdFired 保持 false，
+   * 于是抬指那一步会继续往下数、把这一指当成单击结算成「打开设置」——用户按住不放
+   * 松手却弹出面板。这个标志让「长按时机已到」和「长按真的派发了」解耦：
+   * 抬指时只要它还立着，这一指就到此为止，不再退化成单击。
+   */
+  let holdElapsed = false;
   /** 一次物理按压正在进行：最先到的那一族处理完置真，兼容族到达时直接忽略。 */
   let pressActive = false;
   let pressBeganAt = 0;
@@ -90,6 +99,7 @@ export function mountGestureWatch(ctx: RerushContext): void {
   const abortPress = (): void => {
     pressActive = false;
     holdFired = false;
+    holdElapsed = false;
     cancelHoldTimer();
   };
 
@@ -104,6 +114,8 @@ export function mountGestureWatch(ctx: RerushContext): void {
     // 不摘干净的话，结算完手势又会补发一次长按动作（点一下再按住 = 两个动作）。
     cancelHoldTimer();
     pressActive = false;
+    holdFired = false;
+    holdElapsed = false;
     runGestureAction(ctx, key, name);
   };
 
@@ -148,9 +160,9 @@ export function mountGestureWatch(ctx: RerushContext): void {
     pressActive = true;
     pressBeganAt = Date.now();
 
-    // 有动作正在执行，这一指不排队
-    if (ctx.state.locked) return;
-
+    // 运行期按压照常画灰、照常起长按/连击窗口，不在这里按「锁」一刀切：
+    // 会改数据的动作由派发层 runGestureAction 按动作名裁决（router.ts），
+    // 手势层只负责把「第几指」数清楚；这里若 return，运行期单击连结算都到不了。
     const $chip = p$(chip);
 
     // 点按钮不该把输入框的焦点抢走
@@ -159,11 +171,14 @@ export function mountGestureWatch(ctx: RerushContext): void {
 
     paintLock($chip, true);
     holdFired = false;
+    holdElapsed = false;
     cancelHoldTimer();
     // 新一次按压开始，把上一指留的连击结算窗口也作废：否则「点一下再按住」时
     // 旧的 tapWindowTimer 和新的 holdTimer 会各派发一个动作。
     cancelTapWindow();
     holdTimer = window.setTimeout(() => {
+      // 长按时机已到：这一指到此为止，抬指时不再当单击结算（含下面被运行态拦下的情况）
+      holdElapsed = true;
       // 按下时没锁、等待期间别的动作占住了锁（其余四处入口都有这道检查）
       if (ctx.state.locked) return;
       holdFired = true;
@@ -197,14 +212,16 @@ export function mountGestureWatch(ctx: RerushContext): void {
 
     cancelHoldTimer();
 
-    // 长按已经派发过，这一轮到此为止
-    if (holdFired) {
+    // 长按已经派发过，或者长按时机已到但被运行态拦下：这一轮都到此为止，
+    // 不能把这一指降级成单击（否则按住不放再松手会自动弹出设置面板）。
+    if (holdFired || holdElapsed) {
       holdFired = false;
+      holdElapsed = false;
       return;
     }
 
-    if (ctx.state.locked) return;
-
+    // 抬指照常计入连击（tapRun++ / settleTaps），由派发层按最终动作名裁决；
+    // 手势层不再按 ctx.state.locked 整指吞掉，否则运行期单击连结算都到不了。
     tapRun++;
     cancelTapWindow();
 
@@ -256,8 +273,9 @@ export function mountGestureWatch(ctx: RerushContext): void {
     if ((e as KeyboardEvent).repeat) return;
 
     e.preventDefault();
-    if (ctx.state.locked) return;
 
+    // 键盘当作单击（默认绑定 tap: settings）：运行期也照常派发，由派发层放行。
+    // 按钮画灰由派发层收尾时复位；standDown 里的 blur 顺带挡住按住 Enter 的重复派发。
     paintLock(p$(chip), true);
     runGestureAction(ctx, ctx.settings.bindings.tap, MSG.keyTrigger);
   };

@@ -5,8 +5,8 @@
  * 角色卡绑定的主书 + 附加书，常驻条目（蓝灯）直接进，绿灯条目按关键词扫，
  * 扫进去的条目正文又能继续带出别的条目（递归），最后只把**条目正文**拼起来。
  *
- * `$1` 与 `$9` 都剔掉三类条目：名字像框架的（规则 / MVU / 变量 / 状态 / 思维链…，
- * 见 `BLOCKED_NAME_KEYWORDS`）、大纲表与纪要索引（它们有 `$5` 专用占位符）、
+ * `$1` 与 `$9` 都剔掉三类条目：名字带屏蔽词的（MVU / 变量 / 状态 / 思维链…，
+ * 见 `BLOCKED_NAME_KEYWORDS`；中文「规则」不在其中）、大纲表与纪要索引（它们有 `$5` 专用占位符）、
  * 以及本脚本自己写入的托管条目（名字带 `plot_assistant-` 前缀，见
  * `isManagedWorldbookEntry` —— 资料进了世界书就别在占位符里再展开一遍）。
  * `$9` 再多剔一层：数据库自己生成的条目
@@ -28,8 +28,9 @@
  *    `exclude_recursion` 的条目（那类条目只认基础文本）。
  * 3. **递归最多 10 层**，且 `exclude_recursion` 的条目只认原始扫描文本，
  *    不吃递归扩散出来的文本。
- * 4. **框架条目不进上下文**，且这条屏蔽只对「非数据库生成」的条目生效——
- *    见 `createPlotFilters` 的 `includeEntry`。
+ * 4. **名字带屏蔽词的条目不进上下文**，且这条屏蔽只对「非数据库生成」的条目生效——
+ *    见 `createPlotFilters` 的 `includeEntry`。中文「规则」不屏蔽（2026-11-11 批 76 用户定，
+ *    防止「王国规则总览」这类正经设定被误杀），英文 `Rule` / `rule` 照旧屏蔽。
  */
 
 /** 酒馆助手 `getWorldbook()` 交回来的条目（嵌套形状）。 */
@@ -283,6 +284,46 @@ export function collectWorldbookHits(options: CollectHitsOptions): WorldbookHitE
 }
 
 /**
+ * 酒馆插入位置段位（`world_info_position`：before=0 / after=1 / ANTop=2 / ANBottom=3 /
+ * atDepth=4 / EMTop=5 / EMBottom=6 / outlet=7）。数字与字符串两种写法都认，
+ * 因为预演接口给的是数字、酒馆助手 getWorldbook() 给的是字符串。
+ */
+function nativePositionRank(position: string | number | undefined | null): number {
+  const raw = String(position ?? '').trim().toLowerCase();
+  switch (raw) {
+    case '0': case 'before': case 'before_char': case 'before_character':
+    case 'before_character_definition': return 0;
+    case '1': case 'after': case 'after_char': case 'after_character':
+    case 'after_character_definition': return 1;
+    case '2': case 'antop': case 'before_author_note': return 2;
+    case '3': case 'anbottom': case 'after_author_note': return 3;
+    case '4': case 'atdepth': case 'at_depth': case 'at_depth_as_system': case 'system': return 4;
+    case '5': case 'emtop': case 'before_example_messages': return 5;
+    case '6': case 'embottom': case 'after_example_messages': return 6;
+    case '7': case 'outlet': return 7;
+    default: return 4;
+  }
+}
+
+/**
+ * 按酒馆拼提示词的先后排 $1/$9：插入位置段位 → 顺序号升序 → 原始下标。
+ *
+ * 酒馆 `world-info.js:5084` 先 `[...allActivatedEntries.values()].sort((a,b) => b.order - a.order)`，
+ * 再对各槽 `unshift`，所以同槽里 order 小的在前；position 只决定条目落在提示词哪一段。
+ * $1 是一整段资料、不分槽，这里只保留「段位 → order → 原序」这条线性顺序。
+ * 缺省值统一成「atDepth / 100」，让老版广播（不带这些字段）仍能保持激活清单原序。
+ */
+export function compareByNativeOrder(a: WorldbookHitEntry, b: WorldbookHitEntry): number {
+  const rankA = nativePositionRank(a.position);
+  const rankB = nativePositionRank(b.position);
+  if (rankA !== rankB) return rankA - rankB;
+  const orderA = a.order === null ? 100 : a.order;
+  const orderB = b.order === null ? 100 : b.order;
+  if (orderA !== orderB) return orderA - orderB;
+  return a.placeholderIndex - b.placeholderIndex;
+}
+
+/**
  * 上游 `formatCombinedWorldbookEntries_ACU`：**只拼正文**，不加条目名。
  * 剧情推进传的 `formatEntry` 就是 `content.trim()`，所以这里默认同款。
  */
@@ -298,15 +339,19 @@ export function formatWorldbookHits(entries: WorldbookHitEntry[], formatEntry?: 
 /**
  * 条目名字里出现这些词就当作「框架条目」，不进世界书上下文。
  *
- * 抄自工作流助手 `src/工作流助手/worldbook/blocked.ts` 的 `BLOCKED_KEYWORDS`：
- * 状态栏、变量、规则、思维链这些条目是给 MVU 和正则用的，AI 读了只会照着它们写代码，
- * 而不是照它们写剧情。ACU 那边同名函数（`shared/utils.ts:393` `isEntryBlocked_ACU`）
- * 留着壳但词表是空的，所以真正在过滤的从来只有工作流助手这一份。
+ * 名单与 ACU 剧情推进、工作流助手的 `BLOCKED_KEYWORDS` 一致（各 16 词，见
+ * `D:/Github/可视化前端/src/数据库源代码.js:2492`、`:30863`、`:88393`、`:89036`）。
+ * **唯一例外**：中文「规则」按 2026-11-11 批 76 用户裁定不滤，避免「王国规则总览」
+ * 这类正经设定条目被误杀；英文 `Rule` / `rule` 仍滤（用户同批明确要求）。
  *
- * 大小写敏感是照抄的：`cot` 小写、`Status` / `Rule` 首字母大写各自算独立一条。
+ * 为什么滤：这些名字多半属于给 MVU 变量框架、正则、状态栏用的条目，正文是变量定义或
+ * 格式说明，AI 读了只会照着写代码而不是写剧情。数据库生成的条目不在此列——
+ * 它们名字里常带「变量」「状态」，可它们是数据不是框架，由 `isFrameworkEntry` 放行。
+ *
+ * 大小写敏感：`cot` / `mvu` / `rule` 小写、`Status` / `Rule` 首字母大写，各自算独立一条；
+ * 不做大小写折叠，与上游一致。
  */
 const BLOCKED_NAME_KEYWORDS = [
-  '规则',
   '思维链',
   'cot',
   'MVU',
@@ -373,9 +418,8 @@ export function isFrameworkEntry(entry: Pick<WorldbookHitEntry, 'rawComment' | '
  *
  * 四处照抄：
  * - 大纲表条目与纪要索引条目**一律排除** —— 它们有专用占位符（`$5` 一族）。
- * - 名字含 `BLOCKED_NAME_KEYWORDS` 的**一律排除**，但数据库生成的条目不筛：
- *   那些名字里常带「变量」「状态」，可它们是数据不是框架。这条对应工作流助手
- *   `worldbook/content.ts:144` 的 `if (!autoIncluded && isEntryBlocked(entry)) continue;`。
+ * - 名字含 `BLOCKED_NAME_KEYWORDS` 的**一律排除**（中文「规则」已按批 76 移出名单），
+ *   但数据库生成的条目不筛：那些名字里常带「变量」「状态」，可它们是数据不是框架。
  * - 名字带托管前缀（`plot_assistant-`）的**一律排除** —— 那是本功能自己写进去的条目，
  *   再读一遍就与任务里 `{{标签}}` 的内容重复（2026-11-07 批 37 用户定）。
  * - `enabledEntries` 为空的按「全选」处理；非空时按「这本书的 uid 列表」筛。
@@ -456,3 +500,150 @@ export function buildPlotWorldbookTexts(options: PlotWorldbookOptions): PlotWorl
 
   return { content, contentExcludingDatabase };
 }
+
+/**
+ * 酒馆本轮「真的激活了」的世界书条目（A 方案，2026-11-11 批 75）。
+ *
+ * 数据来源是酒馆自己的扫描结果（Luker `simulateWorldInfoActivation()` 返回的
+ * `activatedEntries`）：蓝灯常驻、绿灯关键词、次关键词逻辑、正则、概率、
+ * 大小写/全词、sticky/cooldown/delay、分组互斥、token 预算、每条目的扫描深度
+ * 全都由酒馆自己算，脚本不再自己重算，也就不会跟酒馆差一条。
+ *
+ * 与旧版 `buildPlotWorldbookTexts` 的差别只有「谁算激活」：
+ * 过滤层（`createPlotFilters`）、$9 剔数据库生成条目、条目勾选、手动选书全部原样保留。
+ *
+ * 分两种书（用户批 75 第 3 条）：
+ * - 角色卡绑定书 / 全局书 / 聊天书：酒馆这轮会扫描它们，只发酒馆算出来的激活条目；
+ * - 既不是绑定书也不是全局书（没启用、根本不会被关键词触发）：勾哪个条目就整条发哪个条目。
+ */
+export interface ActivatedWorldbookEntry {
+  /** 条目所在的世界书文件名（酒馆 `WIScanEntry.world`，运行时带、类型声明里没有）。 */
+  world?: string;
+  uid?: number | string;
+  comment?: string;
+  content?: string;
+  /** 酒馆原生 `world_info_position`：数字 0~7，或酒馆助手给的字符串位置名。 */
+  position?: number | string;
+  /** at_depth 条目的插入深度。 */
+  depth?: number;
+  /** 插入顺序号。酒馆按它排序、再分槽拼进提示词；$1 靠它还原原生条序。 */
+  order?: number;
+}
+
+export interface ActivationWorldbookOptions {
+  /** 这次要发给剧情推进 AI 的书（设置页「跟随角色卡」或「手动选择」的结果）。 */
+  bookNames: string[];
+  /** 酒馆当前真正会扫描的书：角色卡主书 + 附加书 + 全局书 + 聊天书。 */
+  enabledBooks: string[];
+  /** 酒馆本轮原生扫描激活的条目。顺序是「谁先被扫到」，取数层会按 position/order 重排成酒馆提示词的顺序。 */
+  activatedEntries: ActivatedWorldbookEntry[];
+  /** 每本书的全量条目，给「没启用、根本不会被扫描」的书兜底用。 */
+  entriesByBook: Record<string, TavernEntryLike[]>;
+  enabledEntries?: Record<string, unknown> | null;
+}
+
+function activatedToHit(raw: ActivatedWorldbookEntry, index: number): WorldbookHitEntry {
+  const { rawComment, normalizedComment } = getCommentInfo({
+    comment: raw.comment,
+    name: raw.comment,
+  });
+  return {
+    uid: raw.uid ?? '',
+    bookName: String(raw.world ?? ''),
+    comment: rawComment,
+    rawComment,
+    normalizedComment,
+    content: String(raw.content ?? ''),
+    enabled: true,
+    type: 'selective',
+    key: [],
+    position: String(raw.position ?? ''),
+    depth: typeof raw.depth === 'number' && Number.isFinite(raw.depth) ? raw.depth : 0,
+    order: typeof raw.order === 'number' && Number.isFinite(raw.order) ? raw.order : null,
+    prevent_recursion: false,
+    exclude_recursion: false,
+    placeholderIndex: index,
+  };
+}
+
+export function buildPlotWorldbookTextsFromActivation(
+  options: ActivationWorldbookOptions,
+): PlotWorldbookResult {
+  const filters = createPlotFilters({ enabledEntries: options.enabledEntries });
+  const enabledSet = new Set((options.enabledBooks ?? []).filter(Boolean));
+  const scanBooks = new Set((options.bookNames ?? []).filter(bookName => enabledSet.has(bookName)));
+  const directBooks = (options.bookNames ?? []).filter(bookName => !enabledSet.has(bookName));
+
+  const collect = (excludeDatabase: boolean): string => {
+    const kept: WorldbookHitEntry[] = [];
+    const accept = (entry: WorldbookHitEntry): boolean =>
+      filters.includeEntry(entry) &&
+      filters.isSelected(entry) &&
+      (!excludeDatabase || !isDatabaseGeneratedEntry(entry));
+
+    // ① 参与酒馆扫描的书：只认酒馆自己算出来的激活结果，一条不多一条不少。
+    const activatedList = options.activatedEntries ?? [];
+    activatedList.forEach((activated, index) => {
+      const bookName = String(activated?.world ?? '');
+      if (!scanBooks.has(bookName)) return;
+      const entry = activatedToHit(activated, index);
+      if (accept(entry)) kept.push(entry);
+    });
+
+    // ② 没启用的书：酒馆根本不会扫它，谈不上「原生激活」。
+    //    按批 75 用户定的口径——勾哪个条目就整条发哪个条目，不勾的不发。
+    for (const bookName of directBooks) {
+      const rawEntries = options.entriesByBook?.[bookName] ?? [];
+      rawEntries.forEach((raw, index) => {
+        if (raw.enabled === false) return;
+        const entry = normalizeTavernEntry(raw, bookName, activatedList.length + index);
+        if (accept(entry)) kept.push(entry);
+      });
+    }
+
+    // 激活清单是「谁先被扫到谁在前」，酒馆拼提示词时按插入位置 + 顺序号重排过；
+    // $1 不分槽，但要按酒馆原生条序发给剧情推进 AI（批 78 用户定）。
+    return formatWorldbookHits(kept.sort(compareByNativeOrder));
+  };
+
+  return { content: collect(false), contentExcludingDatabase: collect(true) };
+}
+
+/**
+ * 把酒馆给的各种形状的「本轮激活条目」归一成 `ActivatedWorldbookEntry[]`。
+ *
+ * 三种来源：预演接口给数组、WORLD_INFO_ACTIVATED 广播给数组、
+ * WORLDINFO_SCAN_DONE 给 `Map<"书名.uid", 条目>`（连 0 激活也会发，用来清旧缓存）。
+ * 不用 `instanceof Map`：脚本在 iframe、事件来自父窗口，跨 realm 恒为 false。
+ */
+export function normalizeActivatedEntries(entries: unknown): ActivatedWorldbookEntry[] {
+  const isMapLike = (value: unknown): boolean =>
+    !!value &&
+    typeof (value as { entries?: unknown }).entries === 'function' &&
+    typeof (value as { size?: unknown }).size === 'number';
+  const list: unknown[] = isMapLike(entries)
+    ? Array.from((entries as { entries: () => Iterable<[unknown, unknown]> }).entries()).map(([key, value]) => {
+        const raw = (value ?? {}) as Record<string, unknown>;
+        // Map 的 key 是 `${world}.${uid}`；值偶尔不带 world，就从 key 兜底。
+        if (raw.world === undefined || raw.world === null || raw.world === '') {
+          return { ...raw, world: String(key).replace(/\.[^.]+$/, '') };
+        }
+        return value;
+      })
+    : Array.isArray(entries) ? entries : [];
+  const numberOrUndefined = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return list.map(item => {
+    const raw = (item ?? {}) as Record<string, unknown>;
+    return {
+      world: String(raw.world ?? ''),
+      uid: typeof raw.uid === 'number' || typeof raw.uid === 'string' ? raw.uid : '',
+      comment: String(raw.comment ?? ''),
+      content: String(raw.content ?? ''),
+      position: typeof raw.position === 'number' || typeof raw.position === 'string' ? raw.position : undefined,
+      depth: numberOrUndefined(raw.depth),
+      order: numberOrUndefined(raw.order),
+    };
+  });
+}
+

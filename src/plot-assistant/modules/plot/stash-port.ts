@@ -203,6 +203,8 @@ function normalizeLanding(value: unknown): StashEntry['landings'][number] | null
     presetName: typeof record.presetName === 'string' ? record.presetName : '',
     taskRaw,
     taskTags: record.taskTags && typeof record.taskTags === 'object' ? (record.taskTags as StashEntry['landings'][number]['taskTags']) : undefined,
+    // 从上一层继承的缺失标签：不带就丢了滚动带，低频任务换设备后仍会读不到上一轮
+    carriedTags: record.carriedTags && typeof record.carriedTags === 'object' ? (record.carriedTags as StashEntry['landings'][number]['carriedTags']) : undefined,
     // 「本该进正文」的标签清单：不带上，换设备导入后会把只存档的标签误判成缺口
     textTagNames: Array.isArray(record.textTagNames)
       ? record.textTagNames.filter((name): name is string => typeof name === 'string' && name !== '')

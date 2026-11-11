@@ -142,7 +142,7 @@ export function collectLandingContents(
 
 // ───────────────────────── 以下碰酒馆全局（世界书接口） ─────────────────────────
 
-/** 角色卡绑定的书：主书 + 附加书（与 `$1` 读端的 character 口径一致）。读不到给空表。 */
+/** 角色卡绑定的书：主书 + 附加书（清理按钮按这个范围清）。写入目标只取主书，见 resolveWriteTargetBooks。读不到给空表。 */
 function readCharacterBooks(): string[] {
   try {
     const names = getCharWorldbookNames('current');
@@ -166,11 +166,26 @@ function readShelf(): string[] {
   }
 }
 
-/** 写入目标书：character = 角色卡绑定；manual = 勾选且还存在的书（取舍规则只有这一份）。 */
+/** 写入目标书：character = 角色卡的主要知识书（只写主书）；manual = 勾选且还存在的书（取舍规则只有这一份）。 */
 async function resolveWriteTargetBooks(plot: PlotSettings): Promise<string[]> {
+  // 「跟随角色卡」只写主要知识书：附加书不写，primary 为空时目标为空（一本不写，保持静默）。
+  // 收窄只在这里做；readCharacterBooks() 本体仍是「主书 + 附加书」，清理按钮靠它清掉历史误写。
+  let characterBooks: string[];
+  if (plot.worldbookWriteSource === 'manual') {
+    // 手动档取舍只看勾选项与书架，共用纯函数的 manual 分支不会读 characterBooks
+    characterBooks = readCharacterBooks();
+  } else {
+    try {
+      const primary = getCharWorldbookNames('current').primary;
+      characterBooks = typeof primary === 'string' && primary.trim() !== '' ? [primary] : [];
+    } catch (error) {
+      console.warn('[剧情推进助手] 读角色卡主要知识书失败（写入目标按空处理）', error);
+      characterBooks = [];
+    }
+  }
   return resolveWorldbookBooks(
     { source: plot.worldbookWriteSource, books: Array.isArray(plot.worldbookWriteBooks) ? plot.worldbookWriteBooks : [] },
-    readCharacterBooks(),
+    characterBooks,
     readShelf(),
   );
 }

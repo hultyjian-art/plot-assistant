@@ -21,13 +21,15 @@ import {
   type TaskBlockDraft,
   type TaskDraft,
 } from '../plot/preset-edit';
+import { anchorNameOf } from '../plot/floor-anchor';
+import { readArmedTaskIds, setArmedTaskIds } from '../plot/manual-arm';
 import { blockKeyOf } from './block-key';
 import PromptBlockCard from './PromptBlockCard.vue';
 import { countBlocks, moveBlock as moveBlockInList } from '../plot/eng/prompt-blocks';
 
 const props = defineProps<{
   tasks: TaskDraft[];
-  /** 当前预设名：只用来在剪贴板提示里显示「从哪份预设复制的」 */
+  /** 当前预设名：剪贴板提示里显示「从哪份预设复制的」，删任务时也算预约锚点名的前缀。 */
   presetName?: string;
   /** 面板上配好的 API 名字清单：任务可以单独挑一条，也可以跟全局走。 */
   apiNames?: string[];
@@ -71,8 +73,24 @@ function addTask(): void {
   selectedIndex.value = props.tasks.length - 1;
 }
 
+/**
+ * 删任务：先把任务从表里拿掉，再立刻从预约表撤掉它的那一条。
+ * 不能只等发送时顺手清死条目 —— 删掉的任务在下次发送前仍是「已预约」状态，
+ * 楼层按钮会一直亮着。只按锚点名精确排除这一条，别的一律不动。
+ */
 function dropTask(index: number): void {
+  const task = props.tasks[index];
+  if (!task) return;
   props.tasks.splice(index, 1);
+  clearArmedForTask(task);
+}
+
+/** 把一个任务的预约从聊天变量里撤掉（停用 / 关手动 / 删任务时都要立即生效）。 */
+function clearArmedForTask(task: TaskDraft): void {
+  const anchorName = anchorNameOf(props.presetName ?? '', task.id);
+  const armed = readArmedTaskIds();
+  const next = armed.filter(id => id !== anchorName);
+  if (next.length !== armed.length) setArmedTaskIds(next);
 }
 
 /** 左右移一位：只改列表位置。同一阶段是并发跑的，位置只影响展示与标签合并先后。 */
@@ -112,6 +130,21 @@ function moveBlock(task: TaskDraft, from: number, delta: -1 | 1): void {
 function allBlocksOff(task: TaskDraft): boolean {
   const counts = countBlocks(task.blocks);
   return counts.total > 0 && counts.enabled === 0;
+}
+
+/** 手动触发开关：只翻草稿上的状态，写回预设时由 preset-edit 决定落不落键。 */
+function toggleManual(): void {
+  const task = selectedTask.value;
+  if (!task) return;
+  task.manual = !task.manual;
+  // 关掉手动触发后旧预约立刻失效，下一轮发送前不该再占着它。
+  if (!task.manual) clearArmedForTask(task);
+}
+
+/** 停用任务：预约立刻撤掉，按钮也会从楼层上消失。 */
+function toggleEnabled(task: TaskDraft, event: Event): void {
+  const checked = (event.target as HTMLInputElement).checked;
+  if (!checked) clearArmedForTask(task);
 }
 </script>
 
@@ -155,11 +188,29 @@ function allBlocksOff(task: TaskDraft): boolean {
     <p v-if="props.tasks.length === 0" class="acu-notes">{{ UI.plot.presetEditNoTasks }}</p>
 
     <div v-if="selectedTask" class="acu-task-editor">
+      <!-- 手动触发：圆圈按钮 + 右侧标签与说明。圆圈内部被颜色块填满 = 已开启。 -->
+      <div class="task-manual-row">
+        <button
+          type="button"
+          class="task-manual-switch"
+          role="switch"
+          :aria-pressed="selectedTask.manual ? 'true' : 'false'"
+          :aria-label="UI.plot.editorTaskManual"
+          @click="toggleManual"
+        >
+          <span class="task-manual-switch__ring" aria-hidden="true" />
+        </button>
+        <div class="task-manual-copy">
+          <span class="task-manual-copy__label">{{ UI.plot.editorTaskManual }}</span>
+          <span class="task-manual-copy__hint">{{ UI.plot.editorTaskManualHint }}</span>
+        </div>
+      </div>
+
       <div class="acu-row">
         <label>{{ UI.plot.editorTaskName }}</label>
         <input v-model="selectedTask.name" class="acu-input" type="text" style="flex: 1 1 220px; min-width: 0" />
         <label class="acu-toggle">
-          <input v-model="selectedTask.enabled" type="checkbox" class="acu-toggle__input" :aria-label="UI.plot.editorTaskEnabled" />
+          <input v-model="selectedTask.enabled" type="checkbox" class="acu-toggle__input" :aria-label="UI.plot.editorTaskEnabled" @change="toggleEnabled(selectedTask, $event)" />
           <span class="acu-toggle__track" aria-hidden="true" />
           <span class="acu-toggle__label">{{ UI.plot.editorTaskEnabled }}</span>
         </label>
@@ -176,24 +227,30 @@ function allBlocksOff(task: TaskDraft): boolean {
       <p class="acu-notes acu-notes--sm">{{ UI.plot.editorTaskApiHint }}</p>
 
       <!-- 小参数挤进一张网格：标签在上、输入框在下，比「一行一个标签」省一半高度。
-           「顺序」不再给用户配：同一阶段本来就并发跑，顺序只由任务在列表里的位置决定。 -->
+           「顺序」不再给用户配：同一阶段本来就并发跑，顺序只由任务在列表里的位置决定。
+           两行各包一个两列子网格：第一行「阶段 / 每几楼」，第二行「重试次数 / 最少字数」。
+           手动触发隐藏「每几楼」时，阶段仍留在原来的位置，布局不塌。 -->
       <div class="acu-field-grid">
-        <label class="acu-field">
-          <span class="acu-field__label">{{ UI.plot.editorTaskStage }}</span>
-          <input v-model.number="selectedTask.stage" class="acu-input" type="number" min="1" />
-        </label>
-        <label class="acu-field">
-          <span class="acu-field__label">{{ UI.plot.editorTaskMaxRetries }}</span>
-          <input v-model.number="selectedTask.maxRetries" class="acu-input" type="number" min="0" />
-        </label>
-        <label class="acu-field">
-          <span class="acu-field__label">{{ UI.plot.editorTaskMinLength }}</span>
-          <input v-model.number="selectedTask.minLength" class="acu-input" type="number" min="0" />
-        </label>
-        <label class="acu-field">
-          <span class="acu-field__label">{{ UI.plot.editorTaskEvery }}</span>
-          <input v-model.number="selectedTask.everyRounds" class="acu-input" type="number" min="1" />
-        </label>
+        <div class="task-manual-field-row">
+          <label class="acu-field">
+            <span class="acu-field__label">{{ UI.plot.editorTaskStage }}</span>
+            <input v-model.number="selectedTask.stage" class="acu-input" type="number" min="1" />
+          </label>
+          <label v-if="!selectedTask.manual" class="acu-field">
+            <span class="acu-field__label">{{ UI.plot.editorTaskEvery }}</span>
+            <input v-model.number="selectedTask.everyRounds" class="acu-input" type="number" min="1" />
+          </label>
+        </div>
+        <div class="task-manual-field-row">
+          <label class="acu-field">
+            <span class="acu-field__label">{{ UI.plot.editorTaskMaxRetries }}</span>
+            <input v-model.number="selectedTask.maxRetries" class="acu-input" type="number" min="0" />
+          </label>
+          <label class="acu-field">
+            <span class="acu-field__label">{{ UI.plot.editorTaskMinLength }}</span>
+            <input v-model.number="selectedTask.minLength" class="acu-input" type="number" min="0" />
+          </label>
+        </div>
       </div>
       <p class="acu-notes acu-notes--sm">{{ UI.plot.editorTaskEveryHint }}</p>
 
@@ -272,12 +329,20 @@ function allBlocksOff(task: TaskDraft): boolean {
 </template>
 
 <style scoped>
-/* 任务的小参数：一格里「标签在上、框在下」，5 个挤一行，手机上也只折一次 */
+/* 任务的小参数：两行两列 —— 第一行「阶段 / 每几楼」，第二行「重试次数 / 最少字数」。
+   每行各包一个两列子网格，手动触发隐藏「每几楼」时另一个仍留在原位，布局不塌。 */
 .acu-field-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px 8px;
   margin-top: 8px;
+}
+
+.task-manual-field-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 8px;
+  min-width: 0;
 }
 
 .acu-field {
@@ -294,5 +359,80 @@ function allBlocksOff(task: TaskDraft): boolean {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 手动触发开关：圆圈按钮，开启时圆圈内部被颜色块填满。
+   类名统一加 task-manual- 前缀，不与公共样式里的 acu-toggle 撞名。
+   #c9a86a 是初定的金色调，真机过目后再定；关键可视属性带 !important，抗酒馆页面默认按钮样式。 */
+.task-manual-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.task-manual-switch {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px !important;
+  height: 26px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  cursor: pointer;
+}
+
+.task-manual-switch__ring {
+  position: relative;
+  display: block;
+  box-sizing: border-box;
+  width: 20px !important;
+  height: 20px !important;
+  border: 2px solid var(--acu-border) !important;
+  border-radius: 50% !important;
+  background: transparent !important;
+  transition: border-color 0.2s ease;
+}
+
+/* 内圆 = 「圆圈内部被颜色块填满」：关闭时透明，开启时填金色。 */
+.task-manual-switch__ring::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: transparent;
+  transition: background 0.2s ease;
+}
+
+.task-manual-switch[aria-pressed='true'] .task-manual-switch__ring {
+  border-color: #c9a86a !important;
+}
+
+.task-manual-switch[aria-pressed='true'] .task-manual-switch__ring::after {
+  background: #c9a86a !important;
+}
+
+.task-manual-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.task-manual-copy__label {
+  font-size: var(--acu-font-size-body-lg);
+  line-height: 1.35;
+  color: var(--acu-text-1);
+}
+
+.task-manual-copy__hint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--acu-text-3);
 }
 </style>

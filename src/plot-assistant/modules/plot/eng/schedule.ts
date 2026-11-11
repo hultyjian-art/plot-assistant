@@ -28,9 +28,11 @@ export interface TaskSchedule {
   everyRounds?: number;
   /** 老版本记的「上次跑过的轮号」。现在判定不再读它，保留只为兼容旧预设数据。 */
   lastRound?: number;
+  /** 手动触发（批68）：只写 true，关闭=删键。标了它的任务只在这一楼层被预约时才跑。 */
+  manual?: boolean;
 }
 
-export type ScheduleReason = 'always' | 'first' | 'due' | 'not_due' | 'disabled';
+export type ScheduleReason = 'always' | 'first' | 'due' | 'not_due' | 'disabled' | 'manual' | 'manual_idle';
 
 export interface ScheduleDecision {
   /** 这条楼层跑不跑 */
@@ -44,6 +46,10 @@ export interface ScheduleInput {
   gap: number | null;
   everyRounds?: number;
   enabled?: boolean;
+  /** 任务 id：手动任务要拿它去预约集合里查；非手动任务用不到。 */
+  id?: string;
+  /** 这个任务是不是标了「手动触发」。只认严格 true。 */
+  manual?: boolean;
 }
 
 /** 周期规整：缺省 / 脏值 / <1 一律回到 1（= 每条用户楼层都跑）。 */
@@ -58,9 +64,22 @@ export function normalizeEveryRounds(value: unknown): number {
  *
  * gap 拿不准（null / 非数字 / <1）一律判 first —— 宁可多跑一次，
  * 也不要让一个任务永远卡在「还没到期」上，那种静默失效最难查。
+ *
+ * 手动任务（批68）单独走前两条：停用仍压过一切；传了预约名单才按名单判定，
+ * 没传名单（重刷 / 回填）就当没这个标记，回到下面原有的周期判定。这样共用函数
+ * 的默认值保持原行为，不会悄悄改掉其它入口。
  */
-export function shouldRunTask(input: ScheduleInput): ScheduleDecision {
+export function shouldRunTask(input: ScheduleInput, armedTaskIds?: ReadonlySet<string>): ScheduleDecision {
+  // ① 停用最高优先，压过手动预约
   if (input && input.enabled === false) return { run: false, reason: 'disabled' };
+
+  // ② 手动任务：命中预约就立刻跑（不再看 everyRounds），没预约就明确报「等待手动触发」。
+  if (input?.manual === true && armedTaskIds !== undefined) {
+    const id = input?.id;
+    return id !== undefined && armedTaskIds.has(id)
+      ? { run: true, reason: 'manual' }
+      : { run: false, reason: 'manual_idle' };
+  }
 
   const every = normalizeEveryRounds(input?.everyRounds);
   if (every === 1) return { run: true, reason: 'always' };
@@ -91,10 +110,13 @@ export interface FloorSelection<T extends ScheduledTaskLike> {
  *
  * 顺序不变 —— 后面还要按阶段分组，这里改动顺序会让阶段的相对次序变得不可预期。
  * gapOf 由调用方提供：它负责从现存楼层里数出每个任务自己的间隔。
+ * armedTaskIds 是这一楼层被手动预约的任务 id 集合；不传（重刷 / 回填）时手动标记不生效，
+ * 所有任务按原有周期判定，行为与这个参数存在之前完全一致。
  */
 export function selectTasksForFloor<T extends ScheduledTaskLike>(
   tasks: T[],
   gapOf: (taskId: string) => number | null,
+  armedTaskIds?: ReadonlySet<string>,
 ): FloorSelection<T> {
   const list = Array.isArray(tasks) ? tasks.filter(task => task && typeof task.id === 'string' && task.id) : [];
   const due: T[] = [];
@@ -105,7 +127,9 @@ export function selectTasksForFloor<T extends ScheduledTaskLike>(
       gap: gapOf(task.id),
       everyRounds: task.schedule?.everyRounds,
       enabled: task.enabled,
-    });
+      id: task.id,
+      manual: task.schedule?.manual === true,
+    }, armedTaskIds);
     if (decision.run) due.push(task);
     else skipped.push({ id: task.id, decision });
   }

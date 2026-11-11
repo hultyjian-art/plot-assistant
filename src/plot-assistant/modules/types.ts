@@ -254,8 +254,8 @@ export interface PlotSettings {
    */
   worldbookWriteRules: PlotWorldbookWriteRule[];
   /**
-   * 条目写进哪本书：character = 当前角色卡绑定的世界书（主书 + 附加书，与 `$1` 的
-   * 读端口径一致）；manual = 下面勾的那几本。它与 `worldbookSource` 是**读**与**写**
+   * 条目写进哪本书：character = 当前角色卡的主要知识书（只写主书）；manual = 下面勾的那几本。
+   * 它与 `worldbookSource` 是**读**与**写**
    * 两件事，字段、控件都分开。
    */
   worldbookWriteSource: 'character' | 'manual';
@@ -306,7 +306,7 @@ export interface TavernLike {
   name2?: string;
   eventSource?: {
     on(event: string, listener: (...args: unknown[]) => void): void;
-    /** 部分版本才有；卸载时用它摘掉监听，缺了就交给 iframe 回收 */
+    /** 部分版本才有；卸载监听时用它摘掉，缺了就交给 iframe 回收 */
     removeListener?(event: string, listener: (...args: unknown[]) => void): void;
   };
   /** 把酒馆设置写盘（防抖版，改完连接配置的模型后用它） */
@@ -339,6 +339,16 @@ export interface TavernContextLike {
   onlineStatus?: string;
   /** 当前主 API：openai（聊天补全）或 textgenerationwebui 等 */
   mainApi?: string;
+  /**
+   * Luker 内置：按给定聊天快照预演一次酒馆原生世界书扫描。
+   * dryRun=true 不写 sticky/cooldown 状态、不发 WORLD_INFO_ACTIVATED 广播。
+   * 旧版酒馆（10-27 快照及更早）没有这个方法，调用方负责特性探测与降级。
+   */
+  simulateWorldInfoActivation?: (options: {
+    coreChat: Record<string, unknown>[];
+    dryRun?: boolean;
+    type?: string;
+  }) => Promise<{ activatedEntries?: unknown[]; [key: string]: unknown }>;
 }
 
 /** 酒馆里一条「API 连接配置」（connection profile）里本脚本用得到的字段。 */

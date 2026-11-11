@@ -17,7 +17,7 @@ import { callPlotApi } from './data/ai-call';
 import { describePresetProblem, readPlotPreset } from './data/acu-presets';
 import { findStoredPreset } from './data/preset-store';
 import { buildSummaryIndexText, readAcuTables } from './data/read-tables';
-import { buildPlotWorldbookTexts } from './data/worldbook-hits';
+import { resolvePlotWorldbook } from './data/tavern-worldbook-scan';
 import { importPresetConfig } from './eng/preset-import';
 import { pickSummaryIndexEntry } from './eng/data-format';
 import { buildHistoryDigest, pickHistoryMessages } from './eng/history';
@@ -28,9 +28,11 @@ import type { TaskProgressInfo } from './eng/engine';
 import { makeRoundId } from './eng/writeback';
 import type { PlotTask } from './eng/task-model';
 import { anchorNameOf, readAnchorGap, type AnchorFloor } from './floor-anchor';
-import { runPlotRoundForPreset } from './round';
+import { runPlotRoundForPreset, type PlotRoundDeps } from './round';
+import { UI } from '../copy';
+import { readArmedTaskIds, setArmedTaskIds, pruneArmed, toArmedTaskIds } from './manual-arm';
 import { presetImportOptions } from './preset-options';
-import { commitLanding, commitProgress, planStashRun } from './stash-flow';
+import { commitLanding, commitProgress, planStashRun, tagsFromQrfTaskRaw } from './stash-flow';
 import { attachLandingsToChat, collectStashTagMap, type Stash, type StashWorking } from './stash-model';
 import { createLogWriter } from './log-flow';
 import { resolveChatStateStore } from './data/chat-vars';
@@ -88,8 +90,13 @@ interface RawTavernMessage {
   message_id: number;
   role: string;
   message: string;
+  name?: string;
   is_hidden?: boolean;
   extra?: Record<string, unknown>;
+  /** qrf 模式写在楼层顶层的成果字段；升级模式下一般只有 extra 里那份。 */
+  qrf_plot?: string;
+  qrf_plot_preset?: string;
+  qrf_plot_tasks?: Record<string, unknown>;
 }
 
 /** 聊天楼层 → 渲染层认识的样子；预览也 import 这一个，别再各写一份。 */
@@ -99,6 +106,38 @@ export function toPlotMessage(raw: { role?: unknown; message?: unknown; extra?: 
     is_user: raw.role === 'user',
     mes: raw.message,
   };
+}
+
+/**
+ * 从聊天记录里取「最近一层带 qrf 成果的楼层」的逐任务回传（`qrf_plot_tasks`）。
+ *
+ * 只认 `floorId` 之前（不含）的楼层：本轮要核对的是「以前产出过什么」，
+ * 把当前这层算进来就等于自读。读不到返回 `null` —— 调用方据此按「没有」处理。
+ *
+ * 两个位置都看：qrf 模式写在楼层顶层，升级模式摊在 `extra` 里（见 `toPlotMessage` 的展开）。
+ */
+export function readQrfTaskRaw(
+  chat: ReadonlyArray<RawTavernMessage> | null | undefined,
+  floorId: number,
+): Record<string, string> | null {
+  const list = Array.isArray(chat) ? chat : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const item = list[i];
+    if (!item) continue;
+    const id = Number(item.message_id);
+    if (!Number.isFinite(id) || id >= floorId) continue;
+    const top = item.qrf_plot_tasks;
+    const nested = (item.extra as Record<string, unknown> | undefined)?.qrf_plot_tasks;
+    const source = top && typeof top === 'object' ? top : nested;
+    if (!source || typeof source !== 'object') continue;
+    const out: Record<string, string> = {};
+    for (const [taskId, text] of Object.entries(source as Record<string, unknown>)) {
+      if (typeof taskId !== 'string' || taskId === '') continue;
+      if (typeof text === 'string' && text.trim() !== '') out[taskId] = text;
+    }
+    if (Object.keys(out).length > 0) return out;
+  }
+  return null;
 }
 
 /**
@@ -229,6 +268,25 @@ export async function appendPlotBlock(
   const taskAnchorNames = new Map<string, string>(
     config.tasks.map(task => [task.id, anchorNameOf(presetKey, task.id)]),
   );
+
+  // ── 手动触发：先把预约表里的死条目清掉，再把这一轮要用的名单交给引擎 ──
+  //
+  // 预约存的是锚点名（预设名::任务id），按聊天分家。任务改名、删掉、停用、
+  // 或关掉「手动触发」之后，旧锚点名会留在表里，发送前顺手清掉，免得越积越多。
+  const armed = readArmedTaskIds();
+  const liveAnchorNames = new Set<string>(
+    config.tasks
+      .filter((task) => task.enabled !== false && task.schedule?.manual === true)
+      .map((task) => taskAnchorNames.get(task.id) ?? ''),
+  );
+  liveAnchorNames.delete('');
+  const pruned = pruneArmed(armed, liveAnchorNames);
+  const armedChanged = pruned.length !== armed.length || pruned.some((id, index) => id !== armed[index]);
+  if (armedChanged) setArmedTaskIds(pruned);
+  // 预约表按锚点名分家，执行引擎只认任务 id；这里必须显式翻译，
+  // 否则手动任务会被当成「没预约」跳过。
+  const armedTaskIds = toArmedTaskIds(pruned, taskAnchorNames);
+
   const lastAnchorGapOf = (taskId: string): number | null =>
     readAnchorGap(rawChat as AnchorFloor[], taskAnchorNames.get(taskId) ?? '');
   // 日志按绝对楼层号标识：roundIndex 字段沿用旧名，值取这一轮锚定的楼层号。
@@ -255,6 +313,25 @@ export async function appendPlotBlock(
         floorText: anchor.floorText,
         liveFloorIds: rawChat.map((item) => item.message_id),
         taskIds: config.tasks.filter((task) => task.enabled !== false).map((task) => task.id),
+        // 缺口口径（用户 2026-11-11 定）：**必达标签 = 抽取标签 − 豁免标签**，
+        // 逐个查它在暂存区里有没有实物；齐了就不重跑，缺了才重跑。
+        requiredTagsOfTask: (taskId: string) => config.tasks.find((task) => task.id === taskId)?.extractTags,
+        exemptTagsOfTask: (taskId: string) => config.tasks.find((task) => task.id === taskId)?.exemptTags,
+        // 暂存区查不到 → 兜底查楼层的 qrf 字段（用户 2026-11-11 的口径）。
+        // qrf_plot_tasks 里存的是每个任务的原始回传，用该任务自己的抽取名单重抽一遍。
+        qrfTagsOfTask: (taskId: string) => {
+          const task = config.tasks.find((item) => item.id === taskId);
+          if (!task) return null;
+          const rawMap = readQrfTaskRaw(rawChat, anchor?.messageId ?? Number.POSITIVE_INFINITY);
+          const rawForTask = rawMap?.[taskId];
+          if (rawForTask === undefined) return null;
+          return tagsFromQrfTaskRaw(
+            { [taskId]: rawForTask },
+            task.extractTags,
+            task.exemptTags,
+            task.extractInjectTags,
+          );
+        },
         now: Date.now(),
       });
       // 对账把「楼层没了」的账搬进了孤儿区：这一步本身就是一次写盘，不改就白算。
@@ -340,12 +417,14 @@ export async function appendPlotBlock(
     worldbookContent: pickSummaryIndexEntry(entriesByBook as never, bookNames),
   });
 
-  const worldbook = buildPlotWorldbookTexts({
+  // $1 / $9 改吃酒馆本轮原生扫描的激活结果（批 75，A 方案）。
+  const worldbook = await resolvePlotWorldbook({
     bookNames,
-    entriesByBook: entriesByBook as never,
-    baseScanText: [recentText, userText].filter(Boolean).join('\n'),
-    // 用户在「上下文」页取消勾选的条目从这里生效（缺这本书 = 全选）
+    entriesByBook,
     enabledEntries: plotSettings.worldbookEntries,
+    rawChat,
+    userText,
+    baseScanText: [recentText, userText].filter(Boolean).join('\n'),
   });
 
   // ── 用哪条 API：面板里选中的那条；没选/选了个不存在的 → 跟随酒馆当前连接 ──
@@ -362,7 +441,9 @@ export async function appendPlotBlock(
   const timeoutSeconds = plotSettings.requestTimeoutSeconds;
 
   try {
-    const outcome = await runPlotRoundForPreset({
+    // 显式标注类型是为了保住 deps 字面量里那几个回调参数的上下文推断
+    // （callApi / onTaskSettled / onTaskLog 的形参没写类型，靠函数参数推断）。
+    const roundDeps: PlotRoundDeps = {
       preset,
       previousPlot,
       stashHistoryTags,
@@ -442,7 +523,11 @@ export async function appendPlotBlock(
       // 用户按了停止键：立刻结束整轮，不要当成接口失败再重发几次
       isAbort: isUserAbortError,
       checkAbort: () => options.signal?.aborted === true,
-    });
+      // 被预约的手动任务这轮无视「每几楼」直接参与（引擎按 §8 认这个字段）。
+      armedTaskIds,
+    };
+
+    const outcome = await runPlotRoundForPreset(roundDeps);
 
     if (!outcome.ok) {
       // 真的开始跑了却没跑完：留在原地等用户再点一次（下一次会接着这几个欠账跑）。
@@ -453,6 +538,25 @@ export async function appendPlotBlock(
           : outcome.reason;
       logWriter?.finish(`剧情推进未完成（${reasonText}）`);
       return { ok: false, text: userText, note: `剧情推进未完成（${reasonText}）`, blocking: true };
+    }
+
+    // ── 手动触发：结果 ok，把这一轮用掉的预约解除，回到手动待命 ──
+    //
+    // 「用掉」= 这一轮真跑过它，或续跑发现它早已完成；被阻塞 / 失败的一轮
+    // 在上面就返回了，预约表原样保留，下一次用户输入还会再试。
+    //
+    // 形状对齐：预约表存的是锚点名（预设名::任务id），而结果里的 ranTaskIds /
+    // alreadyDone 按引擎既有字段是任务 id；这里用 taskAnchorNames 把任务 id
+    // 映射成锚点名再求交集，同时也把结果里的原样值放进集合（万一引擎直接给锚点名）。
+    const doneIds = new Set<string>();
+    for (const id of [...outcome.ranTaskIds, ...outcome.alreadyDone]) {
+      doneIds.add(id);
+      const anchor = taskAnchorNames.get(id);
+      if (anchor !== undefined) doneIds.add(anchor);
+    }
+    const toDisarm = pruned.filter((id) => doneIds.has(id));
+    if (toDisarm.length > 0) {
+      setArmedTaskIds(pruned.filter((id) => !doneIds.has(id)));
     }
 
     // ── 记账：哪些任务这一轮真的跑了 ──
@@ -492,6 +596,8 @@ export async function appendPlotBlock(
             // 哪些标签「本该进正文」由最终注入模板决定，不是由任务抽了哪些决定。
             // 用户把某些标签从模板里删掉后，它们只该存档/进世界书，不该被当成暂存缺口。
             textTagNames: collectDirectiveTagNames(config.directiveTemplate),
+            // 只保留预设里还在、还启用的任务：删任务或停用后，旧标签不会被继承带无限续命。
+            taskIds: config.tasks.filter((task) => task.enabled !== false).map((task) => task.id),
             now: Date.now(),
           });
           stash = landed.stash;
@@ -548,8 +654,10 @@ function describeSkipped(skipped: { taskId: string; reason: string }[], emptyPro
   const parts: string[] = [];
   const notDue = skipped.filter((item) => item.reason === 'not_due').length;
   const disabled = skipped.filter((item) => item.reason === 'disabled').length;
+  const manualIdle = skipped.filter((item) => item.reason === 'manual_idle').length;
   if (notDue > 0) parts.push(`${notDue} 个还没到楼层间隔`);
   if (disabled > 0) parts.push(`${disabled} 个已停用`);
+  if (manualIdle > 0) parts.push(`${manualIdle} 个任务${UI.plot.manualIdleReason}`);
   if (emptyPromptCount > 0) parts.push(`${emptyPromptCount} 个提示词块全关了`);
   if (parts.length) return parts.join('，');
   return skipped.length ? `跳过 ${skipped.length} 个任务` : '没有可跑的任务';
