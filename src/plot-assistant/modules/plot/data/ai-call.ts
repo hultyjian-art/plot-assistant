@@ -283,14 +283,8 @@ function readReasoning(result: Record<string, unknown>): string {
  * 从工具调用的参数里拣正文。
  *
  * 参数通常是 JSON 字符串；也有渠道直接把正文整段当 arguments 给（解析失败就整段当正文）。
- * 键名按可能性从高到低试，取最长的那段 —— 与 ACU `readArgsContent` 同口径。
- */
-/**
- * 正文所在的键名。
- *
- * 只认 `content`，这不是猜的：宿主的「防截断」扩展声明工具时写的就是
- * `parameters: { properties: { content: { type: 'string' } }, required: ['content'] }`，
- * 正文只能放在这一个键里。多认几个键只会在别的扩展上撞运气，撞错了还会把参数壳当正文。
+ * 只认 `content` 键（宿主「防截断」扩展的工具声明只声明了这个键）；没有 `content`
+ * 时不猜别的键名，只在对象的字符串值里取最长一段交给标签提取器。
  */
 function pickCarriedText(args: unknown): string | null {
   let parsed = args;

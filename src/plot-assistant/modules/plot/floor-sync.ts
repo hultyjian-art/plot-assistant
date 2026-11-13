@@ -16,15 +16,15 @@
  * 编辑事件先排队，推进结束后按序补同步；同步进行中（busy）到达的事件也排队，不丢。
  */
 
-import { isPlainObject } from './guards';
 import type { RerushContext } from '../types';
 import { resolveChatKey } from './chat-key';
 import { resolveChatStateStore } from './data/chat-vars';
 import { writePlotExtraToFloor } from './data/chat-write';
-import type { PlotTaskResult } from './eng/assemble';
-import { QRF_PLOT, QRF_PLOT_PRESET, QRF_PLOT_TASKS, makeRoundId } from './eng/writeback';
-import { plotSegmentOf } from './stash-apply';
+import { QRF_PLOT, QRF_PLOT_PRESET, makeRoundId } from './eng/writeback';
+import { landingSegmentOf, plotSegmentOf } from './stash-apply';
+import { collectTextTagMap, syncTextIntoTagRecords } from './stash-edit';
 import { activeLanding } from './stash-model';
+import { enqueueWorldbookStashRecords } from './worldbook-write';
 
 interface FloorLike {
   message_id: number;
@@ -38,20 +38,15 @@ export interface FloorSyncHandle {
   stop(): void;
 }
 
-/** 把 `qrf_plot_tasks` 那份 map 还原成写回层认识的形状，免得同步时把它清空。 */
-function taskResultsFrom(extra: Record<string, unknown>): PlotTaskResult[] {
-  const raw = extra[QRF_PLOT_TASKS];
-  if (!isPlainObject(raw)) return [];
-  return Object.entries(raw as Record<string, unknown>)
-    .filter(([, value]) => typeof value === 'string' && value.trim() !== '')
-    .map(([taskId, value], index) => ({
-      taskId,
-      taskName: taskId,
-      stage: 1,
-      order: index + 1,
-      success: true,
-      rawResponse: String(value),
-    }));
+/** 这一版里第一个有标签的任务 id —— 正文里出现「谁也不认识」的新标签时记到它名下。 */
+function firstTaskIdOf(landing: {
+  taskTags?: Record<string, unknown>;
+  carriedTags?: Record<string, unknown>;
+}): string | undefined {
+  const own = Object.keys(landing.taskTags ?? {});
+  if (own.length > 0) return own[0];
+  const carried = Object.keys(landing.carriedTags ?? {});
+  return carried[0];
 }
 
 /**
@@ -62,10 +57,10 @@ export async function syncFloorEdit(ctx: RerushContext, messageId: number): Prom
   const floor = Array.isArray(floors) ? floors[0] : undefined;
   if (!floor || floor.role !== 'user') return 'skip:not-user';
 
-  const segment = plotSegmentOf(floor.message);
-  if (!segment) return 'skip:no-plot';
-
   if (ctx.settings.plot.stashMode === 'qrf') {
+    // qrf 模式楼层里认 `<plot>` 段（上游语义）；没有 plot 段说明不是这一路，跳过。
+    const segment = plotSegmentOf(floor.message);
+    if (!segment) return 'skip:no-plot';
     const extra = floor.extra ?? {};
     const current = typeof extra[QRF_PLOT] === 'string' ? extra[QRF_PLOT] : '';
     if (current.trim() === segment.trim()) return 'skip:same';
@@ -74,7 +69,7 @@ export async function syncFloorEdit(ctx: RerushContext, messageId: number): Prom
       saveContent: segment,
       presetName: typeof extra[QRF_PLOT_PRESET] === 'string' ? extra[QRF_PLOT_PRESET] : '',
       roundId: makeRoundId(),
-      taskResults: taskResultsFrom(extra),
+      // 2026-11-12 起 qrf 只记一份标签块，不再写 qrf_plot_tasks，所以这里不传 taskResults。
     });
     return 'qrf-updated';
   }
@@ -88,11 +83,31 @@ export async function syncFloorEdit(ctx: RerushContext, messageId: number): Prom
   if (!entry) return 'skip:no-entry';
   const landing = activeLanding(entry);
   if (!landing) return 'skip:no-landing';
-  const before = plotSegmentOf(landing.finalText);
+  // 升级模式楼层正文就是成果全文；没有 plot 壳时拿整篇比，不能直接跳过。
+  // 空楼层是有效编辑（用户清空正文）：要按空串同步，才能把正文标签清成 tombstone。
+  const messageText = typeof floor.message === 'string' ? floor.message : '';
+  const segment = landingSegmentOf(messageText) ?? (messageText.trim() === '' ? '' : null);
+  if (segment === null) return 'skip:no-plot';
+  const before = landingSegmentOf(landing.finalText);
   if (before !== null && before.trim() === segment.trim()) return 'skip:same';
 
-  // 楼层里改的是 `<plot>` 段：把它当作这一版的新全文。逐任务回传保持原样 ——
-  // 那是"AI 当时回了什么"的记录，用户手改的是最终注入，不是回传。
+  // 楼层里改的是 `<plot>` 段：把它当作这一版的新全文。
+  //
+  // 2026-11-12 起，正文改动要**同时落回标签数据**（用户拍板：数据主源是标签数据，
+  // 成品正文是它的投影）。以前只写 finalText，标签数据不动，下一楼层继承又抄回去，
+  // 用户在楼层里删掉/改掉的标签会复活。
+  //
+  // 复用面板保存的同一套差量函数（stash-edit 的 syncTextIntoTagRecords），
+  // 不另写一份 —— 两条同步路一旦各写一套，迟早漂移。
+  const synced = landing.taskTags
+    ? syncTextIntoTagRecords(landing.taskTags, segment, {
+        reassignTo: firstTaskIdOf(landing),
+        inheritedRecords: landing.carriedTags,
+        textTagNames: landing.textTagNames ?? [...collectTextTagMap(landing.finalText).keys()],
+        onlyKnownTags: landing.textTagNames === undefined,
+      }).records
+    : landing.taskTags;
+
   const next = {
     ...stash,
     entries: stash.entries.map(item =>
@@ -102,12 +117,16 @@ export async function syncFloorEdit(ctx: RerushContext, messageId: number): Prom
             ...item,
             floorText: floor.message,
             landings: item.landings.map(version =>
-              version.id === landing.id ? { ...version, finalText: segment } : version,
+              version.id === landing.id
+                ? { ...version, finalText: segment, ...(synced ? { taskTags: synced } : {}) }
+                : version,
             ),
           },
     ),
   };
   store.saveStash(next);
+  // 楼层正文改了，正在生效的世界书条目也要跟上同一份标签数据。
+  enqueueWorldbookStashRecords(ctx, synced);
   return 'stash-updated';
 }
 

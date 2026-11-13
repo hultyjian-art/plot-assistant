@@ -2,8 +2,8 @@
 /**
  * 暂存区面板：把所有已经落盘的推进成果按楼层列出来，点开一版能看、能改、能按标签删。
  *
- * 只读不写的边界：这里**只碰**聊天变量里的 `reroll_plot_stash`，不写楼层的 qrf，
- * 也不碰 ACU 的任何键。楼层上的那一份是引擎在发送后补写的，两边各管各的。
+ * 写盘边界：改动先落本地草稿，点「保存」才写回聊天变量 `reroll_plot_stash`；不写楼层的 qrf，也不碰 ACU 的键。
+ * 改「使用中」那版时还会同步写楼层正文、世界书条目与输入框，切版本时同步账本的「当前使用」标记。
  *
  * 「保存才生效」是硬要求（用户 2026-11-02 明确）：所有改动都先落在本地草稿里，
  * 点「保存」才写回聊天变量；改了没保存就点叉，必须再问一次。
@@ -12,14 +12,14 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { UI, pickStashEntryLanding } from '../copy';
 import type { RerushContext } from '../types';
 import { dropLandingVersion, editLanding, listEntries, removeLanding } from '../plot/stash-flow';
-import { landingGap, landingSeqOf, setActiveLanding, type LandingGap } from '../plot/stash-model';
+import { landingGap, landingSeqOf, setActiveLanding, taskTagRecordsOfLanding, taskTagsOfLanding, type LandingGap } from '../plot/stash-model';
 import { readPanelStash, savePanelStash } from '../plot/stash-state';
 import { commitStashImport, exportStashToText, prepareStashImport } from '../plot/stash-port-flow';
 import type { ImportPlan, StashPortFile } from '../plot/stash-port';
 import { blockPreview, removeTagBlocks, scanTagBlocks } from '../plot/stash-edit';
 import { landingInFloor } from '../plot/stash-apply';
-import { applyLandingToFloorMessage, putLandingIntoInputBox, readFloorText } from '../plot/stash-apply-io';
-import { enqueueWorldbookStashText } from '../plot/worldbook-write';
+import { applyLandingToFloorMessage, putLandingIntoInputBox, readFloorText, restoreFloorText } from '../plot/stash-apply-io';
+import { enqueueWorldbookStashRecords } from '../plot/worldbook-write';
 import {
   buildHighlightHtml,
   findMatches,
@@ -32,9 +32,9 @@ import type { Stash, StashEntry, StashLanding } from '../plot/stash-model';
 const t = UI.plot;
 
 /**
- * 脚本上下文，只为一件事：把「使用中」版本的编辑同步进世界书（批 45）。
- * 同步走的是 `ctx.settings.plot` 里**已保存**的规则 —— 面板上改了规则还没点
- * 总保存时，照旧口径不算数（与落盘钩子、与第 2 页写入区块的读法一致）。
+ * 脚本上下文用于两件事：读 ctx.state.locked 做推进期间的只读守卫；
+ * 把「使用中」版本的编辑同步进世界书（批 45）。同步走的是 ctx.settings.plot 里
+ * **已保存**的规则 —— 面板上改了规则还没点总保存时，照旧口径不算数。
  */
 const props = defineProps<{ ctx: RerushContext }>();
 
@@ -76,10 +76,10 @@ function blockWhileRunning(): boolean {
   return true;
 }
 
-/** 世界书同步的统一入口：把一段成果文本交给后台队列（没上下文/功能没开时那边自己会退）。 */
-function syncWorldbook(text: string): void {
+/** 世界书同步的统一入口：把一版的合并标签数据交给后台队列（没上下文/功能没开时那边自己会退）。 */
+function syncWorldbook(records: Record<string, { tags: Record<string, string>; injectOnly: string[] }> | null | undefined): void {
   try {
-    enqueueWorldbookStashText(props.ctx, text);
+    enqueueWorldbookStashRecords(props.ctx, records);
   } catch (error) {
     console.warn('[剧情推进助手] 暂存区同步世界书入队失败', error);
   }
@@ -167,8 +167,14 @@ function portFileName(): string {
  */
 function exportStash(): void {
   try {
-    const loaded = readPanelStash();
-    const text = exportStashToText(loaded.stash, loaded.chatKey, Date.now());
+    // 导出必须以面板当前持有的账本为准（用户要求：导出的就是暂存区最新状态）。
+    // 按钮在有脏改动时禁用，所以这里拿到的是已保存的最新快照；别重新读聊天变量，
+    // 那会拿一个比 stash.value 更旧的快照去导出。
+    if (!stash.value) {
+      portNote.value = t.stashImportNoStash;
+      return;
+    }
+    const text = exportStashToText(stash.value, stash.value.chatKey, Date.now());
     const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -228,7 +234,9 @@ function commitImport(file: StashPortFile, plan: ImportPlan): void {
     savePanelStash(next);
     stash.value = next;
     readFloorTexts(next);
-    const lines: string[] = [t.stashImportDone(plan.pairs.length)];
+    const lines: string[] = [];
+    if (plan.pairs.length > 0) lines.push(t.stashImportDone(plan.pairs.length));
+    if (file.orphans.length > 0) lines.push(t.stashImportDoneOrphans(file.orphans.length));
     if (plan.fallback === 'last') lines.push(t.stashImportFallbackLast);
     if (plan.fallback === 'none') lines.push(t.stashImportFallbackNone);
     if (plan.skipped > 0) lines.push(t.stashImportSkipped(plan.skipped));
@@ -311,7 +319,7 @@ const ledgerRows = computed<{ name: string; content: string }[]>(() => {
   const body = new Set(bodyTagNames.value.map((name) => name.toLowerCase()));
   const rows: { name: string; content: string }[] = [];
   const seen = new Set<string>();
-  for (const record of Object.values(currentLanding.value?.taskTags ?? {})) {
+  for (const record of Object.values(taskTagsOfLanding(currentLanding.value))) {
     for (const [name, content] of Object.entries(record?.tags ?? {})) {
       if (typeof content !== 'string' || body.has(name.toLowerCase()) || seen.has(name)) continue;
       seen.add(name);
@@ -333,7 +341,7 @@ const carriedRows = computed<{ name: string; content: string }[]>(() => {
   const body = new Set(bodyTagNames.value.map((name) => name.toLowerCase()));
   const rows: { name: string; content: string }[] = [];
   const seen = new Set<string>();
-  for (const record of Object.values(currentLanding.value?.taskTags ?? {})) {
+  for (const record of Object.values(taskTagsOfLanding(currentLanding.value))) {
     for (const name of Object.keys(record?.tags ?? {})) seen.add(name);
   }
   for (const record of Object.values(currentLanding.value?.carriedTags ?? {})) {
@@ -375,7 +383,8 @@ const tagRows = computed<StashTagRow[]>(() =>
  * 这一版现在缺了哪些标签。
  *
  * 删标签块不拦着 —— 用户要的就是自由编辑。但后果得让人看见：
- * 缺的那部分会在下次拿这一版生成楼层时，自动重跑产出它的任务补回来。
+ * 这里算出的 gap 只取自正文草稿，仅用于下面那句提示文案；下次生成楼层时是否补跑，
+ * 由引擎按暂存区账本与 qrf 兜底判定，不以这个 gap 为输入。
  */
 const gap = computed<LandingGap>(() => {
   const landing = currentLanding.value;
@@ -436,7 +445,7 @@ function openViewer(entry: StashEntry, landing: StashLanding): void {
   const draft: Record<string, string> = {};
   const carried: Record<string, string> = {};
   const taskTagNames = new Set<string>();
-  for (const record of Object.values(landing.taskTags ?? {})) {
+  for (const record of Object.values(taskTagsOfLanding(landing))) {
     for (const [name, content] of Object.entries(record?.tags ?? {})) {
       taskTagNames.add(name);
       if (typeof content !== 'string' || body.has(name.toLowerCase())) continue;
@@ -487,11 +496,15 @@ function entryActionLabel(entry: StashEntry): string {
  * 还没回传」那段时间（`plotRunning`）。进度改由楼层行上那个
  * 「未完成，还欠 N 个任务 · 查看进度」入口进去。
  *
- * 优先顺序：正在用的那一版（activeLandingId）→ 最新一版 → 一版都没有才退回进度视图
- * （**任何一层都必须有反应**，2026-11-09 第 8 条）。
+ * 优先顺序：楼层正文里实际在用的那一版 → 正在用的那一版（activeLandingId）→ 最新一版
+ * → 一版都没有才退回进度视图（**任何一层都必须有反应**，2026-11-09 第 8 条）。
+ *
+ * 先认楼层正文：老账的 activeLandingId 可能指向别的版本（甚至因版本被挤掉而退回最后一版），
+ * 只按账本标记打开，会让用户改到一版「没在用」的成果，保存后世界书当然不跟着变。
  */
 function openEntry(entry: StashEntry): void {
-  const landing = pickStashEntryLanding(entry);
+  const floorText = floorTexts.value[entry.floorId] ?? null;
+  const landing = [...entry.landings].reverse().find((item) => landingInFloor(floorText, item.finalText)) ?? pickStashEntryLanding(entry);
   if (landing) {
     openViewer(entry, landing);
     return;
@@ -547,22 +560,12 @@ async function save(): Promise<void> {
   if (!entry || !landing || !stash.value || busy.value) return;
   const wasInUse = inUse(entry, landing);
   try {
-    // 只把「实际编辑过」的继承标签传给落盘：没改过的行不进 taskTags、不进同步文本，
+    // 只把「实际编辑过」的继承标签传给落盘：没改过的行不进 taskTags，
     // carriedTags 保持原样（用户 2026-11-11 拍板：继承标签可编辑，编辑后算本层产出）。
-    // 落盘会改 stash.value，ledgerRows / carriedRows 随即重算（编辑过的行会从继承分组
-    // 移到账本行），所以同步文本要用的两份行在落盘前先取快照，口径才不漂移。
-    const ledgerRowsSnapshot = ledgerRows.value.map((row) => ({
-      name: row.name,
-      content: ledgerDraft.value[row.name] ?? row.content,
-    }));
     const carriedEdits: Record<string, string> = {};
-    const editedCarriedRows: { name: string; content: string }[] = [];
     for (const row of carriedRows.value) {
       const content = carriedDraft.value[row.name] ?? row.content;
-      if (content !== row.content) {
-        carriedEdits[row.name] = content;
-        editedCarriedRows.push({ name: row.name, content });
-      }
+      if (content !== row.content) carriedEdits[row.name] = content;
     }
     const next = editLanding({
       stash: stash.value,
@@ -571,38 +574,52 @@ async function save(): Promise<void> {
       finalText: draftText.value,
       ledgerEdits: { ...ledgerDraft.value },
       carriedEdits,
+      activate: wasInUse,
       now: Date.now(),
     });
     if (!next) {
       saveError.value = '这一版已经不在账本里了（可能被挤掉了），刷新一下再看。';
       return;
     }
-    savePanelStash(next.stash);
-    stash.value = next.stash;
-    savedText.value = draftText.value;
-    saveError.value = '';
     if (!wasInUse) {
+      savePanelStash(next.stash);
+      stash.value = next.stash;
+      savedText.value = draftText.value;
+      saveError.value = '';
       flash(t.stashSaved);
       return;
     }
+
+    // 使用中的那版：先改楼层，楼层写成功后才落聊天变量。
+    // 反过来（先落变量再改楼层）一旦楼层失败，账本已经换了新内容、楼层还是旧的 ——
+    // 用户再打开面板看到的和 AI 读到的就是两套。楼层失败 = 整次保存失败，账本不动。
     busy.value = true;
+    const beforeText = readFloorText(entry.floorId);
     const result = await applyLandingToFloorMessage(entry.floorId, draftText.value);
-    busy.value = false;
     if (!result.ok) {
+      busy.value = false;
       saveError.value = result.reason || t.stashApplyFailed;
       return;
     }
+    try {
+      savePanelStash(next.stash);
+    } catch (error) {
+      // 楼层已改、聊天变量没落：把楼层恢复原样，保持「要么都成功，要么都不变」。
+      if (beforeText !== null) await restoreFloorText(entry.floorId, beforeText);
+      busy.value = false;
+      throw error;
+    }
+    busy.value = false;
+    stash.value = next.stash;
+    savedText.value = draftText.value;
+    saveError.value = '';
     readFloorTexts(stash.value);
     // 批 45：改的是使用中的那版且楼层已跟上，世界书条目也跟着这份新内容走。
     // 只在这一步同步 —— 楼层写失败时（上面 return 了）世界书保持旧内容，两边不说两样话。
-    // 账本标签、以及编辑过的继承标签，都要并进世界书同步的文本，否则条目还是旧内容。
-    // 写入侧是「这一版有的标签覆盖账本同名内容，其余标签不动」（批 45 拍板），
-    // 这里只拼编辑过的继承行，没编辑的不产生多余写入（用户核实过重放同名内容幂等无害）。
-    syncWorldbook([
-      draftText.value,
-      ...ledgerRowsSnapshot.map((row) => `<${row.name}>${row.content}</${row.name}>`),
-      ...editedCarriedRows.map((row) => `<${row.name}>${row.content}</${row.name}>`),
-    ].join('\n\n'));
+    // 传编辑后这一版的合并标签数据（carriedTags + taskTags），空串 tombstone 会清掉对应条目；
+    // 不再拼文本，以免只进字段 / 只写世界书的标签被漏掉。
+    const updatedLanding = next.entry.landings.find((item) => item.id === landing.id);
+    syncWorldbook(taskTagRecordsOfLanding(updatedLanding));
     flash(t.stashSavedSynced(entry.floorId));
   } catch (error) {
     busy.value = false;
@@ -634,6 +651,7 @@ async function applyToFloor(): Promise<void> {
   const landing = currentLanding.value;
   if (!entry || !landing || busy.value || !stash.value) return;
   busy.value = true;
+  const beforeText = readFloorText(entry.floorId);
   try {
     const result = await applyLandingToFloorMessage(entry.floorId, landing.finalText);
     if (!result.ok) {
@@ -646,13 +664,19 @@ async function applyToFloor(): Promise<void> {
       ...stash.value,
       entries: stash.value.entries.map((item) => (item.floorId === entry.floorId ? marked : item)),
     };
-    savePanelStash(nextStash);
+    try {
+      savePanelStash(nextStash);
+    } catch (error) {
+      // 楼层已改、聊天变量没落：恢复楼层，保持「要么都成功，要么都不变」。
+      if (beforeText !== null) await restoreFloorText(entry.floorId, beforeText);
+      throw error;
+    }
     stash.value = nextStash;
     readFloorTexts(nextStash);
     saveError.value = '';
     // 批 45：切版本 = 换了正在生效的内容。世界书条目跟着切过来的这一版走，
     // 否则楼层里已是新版、世界书条目里还是旧版，AI 两边读到的对不上。
-    syncWorldbook(landing.finalText);
+    syncWorldbook(taskTagRecordsOfLanding(landing));
     flash(t.stashApplied);
   } catch (error) {
     console.error('[剧情推进助手] 写入楼层失败', error);

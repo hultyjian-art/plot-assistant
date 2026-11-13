@@ -9,19 +9,19 @@
  * |---|---|---|
  * | `url` | `apiurl` | 注意是 `apiurl`，全小写，不是 `apiUrl` |
  * | `apiKey` | `key` | |
- * | `source` | `source` | 同名；空串时**不传**，交给酒馆按地址推断 |
+ * | `source` | `source` | 同名；空串时**显式写成 `custom`**（留空会让酒馆退回自己的 openai 源，顶掉面板配的模型） |
  * | `maxTokens` | `max_tokens` | 支持 `'same_as_preset'` / `'unset'` 两个特殊值 |
  * | `temperature` | `temperature` | 同上 |
  * | `requestTimeoutSeconds` | —— | **酒馆没有这个字段**，只能丢掉（见下） |
  *
  * ## 两个刻意不做的事
  *
- * 1. **`apiMode === 'tavern'` 时整个返回 `undefined`**（= 不传 `custom_api`）。
+ * 1. **`apiMode === 'tavern'` 时返回 `null`**（= 不传 `custom_api`）。
  *    这不是偷懒：不传 `custom_api` 就等价于"用酒馆当前连接"，正是"跟随酒馆"要的效果。
  *    如果硬塞一个空对象进去，酒馆会以为用户要自定义，反而可能把当前连接覆盖掉。
  * 2. **超时秒数不转过去**。酒馆的 `custom_api` 没有超时字段，硬塞进
  *    `custom_include_body` 是错的 —— 那是请求体参数，不是请求超时。
- *    超时留给调用方在外层用 `Promise.race` 处理（目前没做，见 risks）。
+ *    超时由 `data/ai-call.ts` 的 `runWithTimeout` 在外层掐断（`stopGenerationById`），不是请求参数。
  */
 
 import { parseBodyParams, parseExcludeParams } from './api-body';

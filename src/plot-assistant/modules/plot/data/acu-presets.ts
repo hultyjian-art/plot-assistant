@@ -13,7 +13,7 @@ import { isPlainObject } from '../guards';
 export interface AcuPresetApiLike {
   getPlotPresetNames?: () => unknown;
   getPlotPresetDetails?: (name: string) => unknown;
-  /** 一把全部预设（带内容）。有它就优先用，比按名字逐个取快得多。 */
+  /** 一把全部预设（可能只有轻量信息）。只作「按名字取不到详情」时的退路，不优先用。 */
   getPlotPresets?: () => unknown;
   /** ACU 那边**当前实际在用的**那一份（对当前聊天绑定生效的那份）。 */
   getCurrentPlotPreset?: () => unknown;
@@ -139,8 +139,8 @@ export type PresetListOutcome =
 /**
  * 一次把 ACU 里的全部剧情预设连内容一起取回来 —— 「一键导入」用的就是这个。
  *
- * 优先走 `getPlotPresets()`（一次拿到全部，含内容）；
- * 老版本 ACU 若没有这个接口，就退回去按名字逐个 `getPlotPresetDetails()`。
+ * 一律优先按名字逐个 `getPlotPresetDetails()`；`getPlotPresets()` 的结果只作
+ * 「按名字取不到详情」时的退路（列表项可能是轻的，没有 plotTasks / prompts）。
  * 两条路都会跳过「没有名字」和「取不回对象」的坏条目，并把条数报给调用方，
  * 免得用户以为「明明有 3 个，怎么只导进来 2 个」。
  */

@@ -7,7 +7,6 @@
  * 面板上删标签和「应用到楼层」就会对不上。
  */
 import { splitPlotMessage } from './stash-edit';
-import type { StashLanding } from './stash-model';
 
 /** `<plot …>` 到最后一个 `</plot>` 的原始片段与起止位置；没有就 null。 */
 export function plotSpan(text: string): { start: number; end: number } | null {
@@ -27,28 +26,39 @@ export function plotSegmentOf(finalText: string): string | null {
 }
 
 /**
- * 「应用到楼层」：保留楼层里用户自己写的那段话与指令头，只换掉 `<plot>` 那一段。
+ * 版本「真正写进楼层的那一段」。
  *
- * 为什么不是整段替换成版本全文：楼层正文是「用户原话 + 空行 + 指令头 + <plot>」，
+ * 老版本/上游模板会把成果包进 `<plot>…</plot>`；现行预设的 finalSystemDirective
+ * 本身不含 `<plot>`，buildFinalMessage 产出的整篇正文就是成果。没有 plot 壳时
+ * 必须把整篇当成果段，否则「使用中」永远判不出来、「应用」会一遍遍往后追加。
+ */
+export function landingSegmentOf(finalText: string): string | null {
+  const segment = plotSegmentOf(finalText);
+  if (segment !== null) return segment;
+  return typeof finalText === 'string' && finalText.trim().length > 0 ? finalText : null;
+}
+
+/**
+ * 「应用到楼层」：优先保留楼层里用户自己写的那段话与指令头，只换掉 `<plot>` 那一段。
+ *
+ * 为什么不是永远整段替换成版本全文：老楼层可能是「用户原话 + 空行 + 指令头 + <plot>」，
  * 版本全文里没有用户原话。整段替换会把用户说的话抹掉 —— 那正是第 4 期坚决没走的路。
- * 楼层里要是本来没有 `<plot>`（旧楼层 / 手工改过），就把这一版追加到末尾。
- *
- * 版本里没有 `<plot>` 段时，如果楼层本来有，就**一个字都不动**并把它当作失败：
- * 把没有 `<plot>` 的正文写进楼层，下一轮 `$6`（上一轮剧情）就读不到这一轮了，
- * 这比「没换成」更糟 —— 静默毁掉一段还能用的记录。
+ * 现行预设的 finalSystemDirective 不含 `<plot>`，楼层与版本都没有 plot 壳时，
+ * 楼层正文本身就是成果全文，直接整段替换；只有旧楼层有 plot 壳、新版本没有时，
+ * 才保持原样并当作失败（避免把下一轮 `$6` 还能读的记录悄悄换掉）。
  */
 export function applyLandingToFloor(floorText: string, finalText: string): string {
   const base = typeof floorText === 'string' ? floorText : '';
-  const segment = plotSegmentOf(finalText);
-  if (!segment) {
-    if (plotSpan(base)) return base;
-    const plain = typeof finalText === 'string' ? finalText : '';
-    if (plain.trim().length === 0) return base;
-    const head = base.replace(/\s+$/, '');
-    return head.length > 0 ? `${head}\n\n${plain}` : plain;
-  }
+  const segment = landingSegmentOf(finalText);
+  if (!segment) return base;
   const span = plotSpan(base);
-  if (span) return `${base.slice(0, span.start)}${segment}${base.slice(span.end)}`;
+  if (span) {
+    // 旧楼层有 plot 壳、新版本没有：保持原样（拒绝），避免把还能读的一版悄悄换掉。
+    if (!plotSpan(finalText)) return base;
+    return `${base.slice(0, span.start)}${segment}${base.slice(span.end)}`;
+  }
+  // 新版本也没有 plot 壳：升级模式下楼层正文就是成果全文，整段替换而不是追加。
+  if (!plotSpan(finalText)) return segment;
   const head = base.replace(/\s+$/, '');
   return head.length > 0 ? `${head}\n\n${segment}` : segment;
 }
@@ -64,15 +74,6 @@ export function inputTextWithLanding(userText: string, finalText: string): strin
   const body = typeof finalText === 'string' ? finalText.replace(/^\s+/, '') : '';
   if (body.length === 0) return head;
   return head.length > 0 ? `${head}\n\n${body}` : body;
-}
-
-/** 一版成果里每个任务的原始回传，按 key 顺序排好给面板展示。 */
-export function landingTaskRows(landing: StashLanding | null): { taskId: string; raw: string }[] {
-  if (!landing || !landing.taskRaw) return [];
-  return Object.keys(landing.taskRaw)
-    .filter((key) => key.length > 0)
-    .sort()
-    .map((taskId) => ({ taskId, raw: String(landing.taskRaw[taskId] ?? '') }));
 }
 
 /** 面板上一行预览：压掉换行、限长。 */
@@ -100,7 +101,7 @@ export function hasPlotBlock(text: string): boolean {
 export function landingInFloor(floorText: string | null | undefined, finalText: string): boolean {
   const base = typeof floorText === 'string' ? floorText : '';
   if (base.trim().length === 0) return false;
-  const segment = plotSegmentOf(finalText);
+  const segment = landingSegmentOf(finalText);
   if (!segment) return false;
   if (base.includes(segment)) return true;
   return squashSpace(base).includes(squashSpace(segment));

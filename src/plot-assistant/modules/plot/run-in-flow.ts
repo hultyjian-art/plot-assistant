@@ -25,6 +25,7 @@ import { applyContextTagFilters } from './eng/context-tags';
 import { getPlotFromHistory } from './eng/history-plot';
 import { collectDirectiveTagNames, type PlotTaskResult } from './eng/assemble';
 import type { TaskProgressInfo } from './eng/engine';
+import { parseConfiguredTags } from './eng/task-accept';
 import { makeRoundId } from './eng/writeback';
 import type { PlotTask } from './eng/task-model';
 import { anchorNameOf, readAnchorGap, type AnchorFloor } from './floor-anchor';
@@ -32,12 +33,12 @@ import { runPlotRoundForPreset, type PlotRoundDeps } from './round';
 import { UI } from '../copy';
 import { readArmedTaskIds, setArmedTaskIds, pruneArmed, toArmedTaskIds } from './manual-arm';
 import { presetImportOptions } from './preset-options';
-import { commitLanding, commitProgress, planStashRun, tagsFromQrfTaskRaw } from './stash-flow';
-import { attachLandingsToChat, collectStashTagMap, type Stash, type StashWorking } from './stash-model';
+import { commitLanding, commitProgress, planStashRun } from './stash-flow';
+import { collectStashTagMap, tagBlocksFromStash, taskTagRecordsOfLanding, type Stash, type StashWorking } from './stash-model';
 import { createLogWriter } from './log-flow';
 import { resolveChatStateStore } from './data/chat-vars';
 import { resolveChatKey } from './chat-key';
-import { enqueueWorldbookCheck, enqueueWorldbookLanding } from './worldbook-write';
+import { enqueueWorldbookCheck, enqueueWorldbookLanding, enqueueWorldbookStashRecords } from './worldbook-write';
 import { processTavernTemplateText, readRoundIdentity, substituteTavernMacros } from '../tavern';
 import { resolveWorldbookBooks, type WorldbookPick } from './worldbook-select';
 
@@ -315,23 +316,15 @@ export async function appendPlotBlock(
         taskIds: config.tasks.filter((task) => task.enabled !== false).map((task) => task.id),
         // 缺口口径（用户 2026-11-11 定）：**必达标签 = 抽取标签 − 豁免标签**，
         // 逐个查它在暂存区里有没有实物；齐了就不重跑，缺了才重跑。
-        requiredTagsOfTask: (taskId: string) => config.tasks.find((task) => task.id === taskId)?.extractTags,
-        exemptTagsOfTask: (taskId: string) => config.tasks.find((task) => task.id === taskId)?.exemptTags,
-        // 暂存区查不到 → 兜底查楼层的 qrf 字段（用户 2026-11-11 的口径）。
-        // qrf_plot_tasks 里存的是每个任务的原始回传，用该任务自己的抽取名单重抽一遍。
-        qrfTagsOfTask: (taskId: string) => {
+        // 必达 = 抽取标签 + 只进字段；豁免由 planStashRun 的 requiredOption 统一扣。
+        // 只取 extractTags 会把「只进字段」的标签漏出必达清单，缺失时也不会重跑。
+        requiredTagsOfTask: (taskId: string) => {
           const task = config.tasks.find((item) => item.id === taskId);
-          if (!task) return null;
-          const rawMap = readQrfTaskRaw(rawChat, anchor?.messageId ?? Number.POSITIVE_INFINITY);
-          const rawForTask = rawMap?.[taskId];
-          if (rawForTask === undefined) return null;
-          return tagsFromQrfTaskRaw(
-            { [taskId]: rawForTask },
-            task.extractTags,
-            task.exemptTags,
-            task.extractInjectTags,
-          );
+          return task ? parseConfiguredTags(task.extractTags, task.extractInjectTags).join(',') : undefined;
         },
+        exemptTagsOfTask: (taskId: string) => config.tasks.find((task) => task.id === taskId)?.exemptTags,
+        // 2026-11-12 起不再有「查楼层 qrf 兜底」这一路：qrf_plot_tasks 已废弃，
+        // 核对只剩「暂存区实物」一条来源（主口径本来就是它）。
         now: Date.now(),
       });
       // 对账把「楼层没了」的账搬进了孤儿区：这一步本身就是一次写盘，不改就白算。
@@ -373,8 +366,16 @@ export async function appendPlotBlock(
   // 所以开轮挂在 `onRoundPlanned` 上 —— 它是「真要发第一个请求了」的信号。
   const logWriter = anchor ? createLogWriter({ store }) : null;
 
-  // 升级模式的上一轮成果在账本里、不在楼层字段上：先贴回聊天记录，再让 `$6` 去挑。
-  const historyChat = useStash ? attachLandingsToChat(chat, rawChat, stash, config.name) : chat;
+  // ── `$6`（上一轮剧情）：两个模式各走各的路（2026-11-12 用户拍板） ──
+  //
+  // 以前的做法是「升级模式先把账本贴回内存里的 qrf_plot，再统一从 qrf_plot 读」。
+  // 用户明确指出这很绕：「升级模式下都不写入 qrf，怎么能固定读 qrf plot？」
+  //
+  // 现在分两条：
+  // - **升级模式**：直接取暂存账本里上一层的标签数据（`collectStashTagMap` 已有路径），
+  //   拼成标签块当 `$6`。楼层磁盘一个字不动，也不用临时伪造 qrf。
+  // - **qrf 模式**：楼层里真有 `qrf_plot`（现在存的是标签块），照旧从楼层读。
+  const historyChat = chat;
   // 提取/排除规则只作用在 `$7` 的前文楼层上（ACU 原版口径），世界书 `$1` 不过滤。
   const hasTagRules = config.extractRules.length > 0 || config.excludeRules.length > 0;
   const historyDigest = buildHistoryDigest(
@@ -389,7 +390,9 @@ export async function appendPlotBlock(
       hasTagRules,
     ),
   );
-  const previousPlot = getPlotFromHistory(historyChat, {}, config.name);
+  const previousPlot = useStash
+    ? tagBlocksFromStash(stash, anchor?.messageId ?? Number.POSITIVE_INFINITY)
+    : getPlotFromHistory(historyChat, {}, config.name);
   // `{{标签}}` 的主来源：暂存区账本里上一轮的标签投影（qrf 模式没有账本，退回上一楼层正文）。
   const stashHistoryTags = useStash ? collectStashTagMap(stash, anchor?.messageId ?? Number.POSITIVE_INFINITY) : null;
   const recentText = (historyLimit === 0 ? [] : rawChat.slice(-historyLimit))
@@ -581,6 +584,7 @@ export async function appendPlotBlock(
     // 不再问「覆盖哪一版」，自动跑、完成之后删最旧）。挤掉的只是成果，锚点不动。
     // 写账失败不能拖累发送：账是辅助，消息才是用户要的。
     let commit: PlotCommit | undefined;
+    let worldbookRecords: ReturnType<typeof taskTagRecordsOfLanding> | null = null;
     if (anchor) {
       // qrf 模式不记两版成果：这一版直接进楼层字段（由 after-send 写），账本一个字不动。
       if (useStash) {
@@ -602,6 +606,7 @@ export async function appendPlotBlock(
           });
           stash = landed.stash;
           store.saveStash(stash);
+          worldbookRecords = taskTagRecordsOfLanding(landed.landing);
         } catch (error) {
           console.warn('[剧情推进助手] 保存暂存成果失败（不影响本次发送）', error);
         }
@@ -613,7 +618,7 @@ export async function appendPlotBlock(
         presetName: outcome.presetName || presetKey,
         roundId: makeRoundId(),
         taskResults: settled.slice(),
-        anchorNames: outcome.ranTaskIds
+        anchorNames: [...new Set([...outcome.ranTaskIds, ...outcome.alreadyDone])]
           .map((id) => taskAnchorNames.get(id))
           .filter((name): name is string => Boolean(name)),
       };
@@ -624,9 +629,18 @@ export async function appendPlotBlock(
 
     // ── 世界书写入（2026-11-07 批 36/37）：落盘后把规则选中的标签块写进世界书 ──
     //
-    // 用引擎聚合出的**完整**标签表（含续跑时从账本补齐的上半场），不是只看本轮结果 ——
-    // 分两次跑完的一轮，落盘成果里两个半场的标签都算数。后台排队写，不阻塞返回。
-    enqueueWorldbookLanding(ctx, outcome.outcome.aggregatedTags);
+    // 用这一版成果的**完整标签记录**（carriedTags + taskTags）同步，不是只看本轮引擎聚合结果 ——
+    // 用户 2026-11-13 口径：下一楼层跑完后，本轮产出与继承自旧楼层的标签都要立刻进世界书；
+    // 面板里改过、但本轮没重跑的任务标签也必须算数。
+    //
+    // 升级模式没有成果记录（落盘异常、无锚点）时直接不写：聚合标签只是本轮跑过的任务的
+    // 半份结果，拿它补写会让世界书停在“本轮谁跑了谁才更新”的旧状态。qrf 模式没有暂存账，
+    // 聚合结果仍是它唯一可用的来源，所以只在 qrf 模式保留这条旧路径。
+    if (worldbookRecords) {
+      enqueueWorldbookStashRecords(ctx, worldbookRecords);
+    } else if (!useStash) {
+      enqueueWorldbookLanding(ctx, outcome.outcome.aggregatedTags);
+    }
 
     // 楼层正文写什么，由调用方决定：
     // - 手势重刷沿用「原文 + 空行 + 指令块」，用户回头还能看见自己说了什么；

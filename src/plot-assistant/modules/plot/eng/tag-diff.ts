@@ -590,6 +590,88 @@ export interface TagDiffTaskLike {
   exemptTags?: string;
 }
 
+/** 内置差量规则提示词的头部。两个占位符由 buildTagDiffInstruction 按任务替换。 */
+const TAG_DIFF_INSTRUCTION_HEAD =
+  '【标签差量更新规则】\n这条规则由脚本自动附加，不是剧情内容。下列标签本轮采用差量更新：你只需要回传有变化的部分，脚本会自动把它和上一轮的内容合并；你没有提到的内容，脚本会保留上一轮的原内容。\n不在名单里的标签仍按任务要求输出完整内容，不要对它们使用差量写法。\n所有要回传的标签都必须用完整的一对 <标签名>…</标签名> 包住，标签名不要加属性或空格；同一个标签本轮只写一对，不要拆成多段同名标签。标签的开始标记和结束标记必须各自单独占一行：<标签名> 和 </标签名> 不能和正文、其他标签或 ### 标题挤在同一行。';
+
+const TAG_DIFF_BLOCK_SECTION =
+  '- 按块合并（{{按块合并标签}}）：\n  1. 块标题必须单独占一行，格式正好是「### 块名」：三个 # 后跟一个空格，并且 ### 必须从行首开始，前面不要空格或缩进。不要用 ####，不要把正文写在标题同一行。已有块必须沿用上一轮的块名，不能改名；改名会被当成新增块，旧块不会消失。同一个块名本轮只写一次，多个小节写在同一块里；块名不能为空。块的正文里不要出现以 ### 开头的行——脚本会把任何 ### 开头的行当成新块标题，正文会被截断或拆成新块。\n  2. 每个块里只写有变化的小节。小节标题必须单独占一行，格式正好是「【小节名】」：方括号里只有小节名，前后不要加字；小节正文从下一行开始。不要把「【小节名】正文」写在同一行——脚本不认这种写法，会把整段当成块正文整块替换，导致这一块其他小节丢失。小节名也要和上一轮完全一致，不能改名；改名会被当成新增小节，旧小节还留着，同一内容会重复。小节标题不要使用【删除】【移入】【移出】【状态】这些脚本保留的指令名当小节名，否则会被当成指令处理。\n  3. 写了哪个小节，就必须写出这个小节更新后的完整内容，不能只写变化的几句话；只写小节标题、下面不写正文，脚本会把这个小节的内容清空；这个小节没有变化就不要写它，没有写的小节脚本会保留上一轮。\n  4. 如果你不写任何【小节】行，只写一段块正文，脚本会把这段正文当作这一块的完整新正文，整块替换上一轮的旧正文；所以这种情况必须写出这一块的完整内容。只写「### 块名」、下面不写正文：已有块会保留上一轮正文不变，新块会创建一个空块，所以新块必须写正文。块正文第一个【小节】之前不要写任何说明文字，脚本会丢掉补丁里的这段开头；要保留的内容请写进某个小节。块标题之外的文字（第一个块标题之前、块与块之间的说明）不会被保存，只写块内容。按块合并的标签，整段必须是块文档；上一轮已有内容时，如果一个 ### 块都没有（也没有【删除】行），脚本会认为没有更新，整份补丁不生效、上一轮原样保留，不要用表格或纯文本代替块。\n  5. 要删除整块，单独写一行「【删除】块名」，这一行不能有别的内容，块名要和上一轮完全一致。要改变归属，在块正文里单独写一行「【移入 目标标签名】」或「【移出】」；写在块标题上面、块外面或和正文挤在同一行都不会生效。';
+
+const TAG_DIFF_TABLE_SECTION =
+  '- 按表格行合并（{{按表格行合并标签}}）：\n  1. 每次都必须带上原表的表头行和分隔行。表头行必须以 | 开头并以 | 结尾，原样抄上一轮的表头（列名、顺序、空格都不要改），下一行是 |---|---| 这样的分隔行。缺了表头或分隔行，整张表不会被识别，补丁不会合并。\n  2. 数据行也必须以 | 开头并以 | 结尾，列数和表头一致。只写有变化的行；没有写到的行脚本会自动保留上一轮。如果这一轮要更新表格，却完全没有写表格（也没有写【删除】行），脚本会认为没有表格更新，整份补丁不生效，上一轮原样保留。\n  3. 第一列是行键（通常是名字），不能改行键；改行键会被当成新增行，旧行不会消失。要改某一行，按原列数整行重写；要新增一行，直接写这一行；要删除一行，单独写一行「【删除】行名」，这一行不能有别的内容，行名要和第一列完全一致。删除会作用到这个标签里所有第一列同名的行。\n  4. 同一个标签里有多张表时，每张表都要带自己的表头行和分隔行，表头必须原样；脚本按表头找表，表头变了会被当成新表追加，旧表还在。不要放两张表头完全相同的表，脚本只会往第一张里合并。表格外的说明文字不会被保存，补丁里不要写。';
+
+const TAG_DIFF_INSTRUCTION_TAIL_COMMON =
+  '某个差量标签这轮不需要更新时，仍然要写出完整的一对 <标签名>【无变化】</标签名>，不能只写【无变化】四个字，也不能省略标签本身；【无变化】必须单独占满整个标签内容，不要加解释。某个标签上一轮没有内容（首次生成）时，必须输出完整内容，不能写【无变化】。';
+
+const TAG_DIFF_INSTRUCTION_TAIL_BLOCK = '首次生成按块合并的标签必须写出完整块结构。';
+
+const TAG_DIFF_INSTRUCTION_TAIL_TABLE = '首次生成按表格行合并的标签必须写出完整表头和所有行。';
+
+const TAG_DIFF_INSTRUCTION_NESTED =
+  '如果标签内部还包含别的标签（嵌套标签），把内层标签写在外层标签里面，不要在外层之外再单独输出内层标签；重复输出可能被脚本当作嵌套内容丢掉。';
+
+const TAG_DIFF_INSTRUCTION_TAIL = [
+  TAG_DIFF_INSTRUCTION_TAIL_COMMON,
+  TAG_DIFF_INSTRUCTION_TAIL_BLOCK,
+  TAG_DIFF_INSTRUCTION_TAIL_TABLE,
+  TAG_DIFF_INSTRUCTION_NESTED,
+].join('\n');
+
+/**
+ * 使用说明页直接展示这段模板，保证「说明里的写法」和「实际注入的提示词」是同一份。
+ * 两个占位符分别对应按块合并、按表格行合并的标签名单。
+ */
+export const TAG_DIFF_INSTRUCTION_TEMPLATE = [
+  TAG_DIFF_INSTRUCTION_HEAD,
+  TAG_DIFF_BLOCK_SECTION,
+  TAG_DIFF_TABLE_SECTION,
+  TAG_DIFF_INSTRUCTION_TAIL,
+].join('\n');
+
+/** 一个任务里实际命中差量模式的标签，按模式分组；保持标签串里的原顺序并去重。 */
+export function collectTaskDiffTags(
+  task: TagDiffTaskLike,
+  modes: Record<string, TagDiffMode>,
+): { blocks: string[]; table: string[] } {
+  const blocks: string[] = [];
+  const table: string[] = [];
+  const seen = new Set<string>();
+  // 和三处缺口/合并端同一口径：抽取标签 + 只进字段 + 豁免标签都可能回传并参与差量。
+  const names = splitTagList(`${task.extractTags || ''},${task.extractInjectTags || ''},${task.exemptTags || ''}`);
+  for (const name of names) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const mode = normalizeTagDiffMode(modes[name]);
+    if (mode === 'blocks') blocks.push(name);
+    else if (mode === 'table') table.push(name);
+  }
+  return { blocks, table };
+}
+
+/**
+ * 按任务生成要顶在任务消息最前面的差量规则。
+ * 只写本任务实际命中 blocks / table 的标签；一个都没有时返回空串，不打扰 AI。
+ */
+export function buildTagDiffInstruction(
+  task: TagDiffTaskLike,
+  modes: Record<string, TagDiffMode>,
+): string {
+  const { blocks, table } = collectTaskDiffTags(task, modes);
+  if (blocks.length === 0 && table.length === 0) return '';
+  const lines = [TAG_DIFF_INSTRUCTION_HEAD];
+  if (blocks.length > 0) {
+    lines.push(TAG_DIFF_BLOCK_SECTION.replace('{{按块合并标签}}', blocks.join('、')));
+  }
+  if (table.length > 0) {
+    lines.push(TAG_DIFF_TABLE_SECTION.replace('{{按表格行合并标签}}', table.join('、')));
+  }
+  lines.push(TAG_DIFF_INSTRUCTION_TAIL_COMMON);
+  if (blocks.length > 0) lines.push(TAG_DIFF_INSTRUCTION_TAIL_BLOCK);
+  if (table.length > 0) lines.push(TAG_DIFF_INSTRUCTION_TAIL_TABLE);
+  lines.push(TAG_DIFF_INSTRUCTION_NESTED);
+  return lines.join('\n');
+}
+
 export interface ApplyTagDiffsInput {
   /** AI 这一轮实际回传的补丁原文 */
   rawResponse: string;

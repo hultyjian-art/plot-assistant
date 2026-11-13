@@ -17,7 +17,6 @@ import { resolveChatKey } from './chat-key';
 import { resolveChatStateStore } from './data/chat-vars';
 import { clearPlotExtraFromFloor, writePlotExtraToFloor } from './data/chat-write';
 import { makeRoundId } from './eng/writeback';
-import type { PlotTaskResult } from './eng/assemble';
 import { plotSegmentOf } from './stash-apply';
 import {
   activeLanding,
@@ -28,7 +27,7 @@ import {
   type StashEntry,
   type StashLanding,
 } from './stash-model';
-import { QRF_PLOT, QRF_PLOT_PRESET, QRF_PLOT_TASKS } from './eng/writeback';
+import { QRF_PLOT, QRF_PLOT_PRESET, QRF_PLOT_TASKS_LEGACY } from './eng/writeback';
 
 /** 迁移结果。`failed` 不为 0 时调用方要在面板上说清楚"有几层没搬成"。 */
 export interface ModeMigrationResult {
@@ -45,18 +44,6 @@ interface FloorLike {
   message: string;
   role?: string;
   extra?: Record<string, unknown>;
-}
-
-/** 从一版的逐任务回传重建 `PlotTaskResult[]`，让写回时能同时补上 `qrf_plot_tasks`。 */
-function taskResultsOf(landing: StashLanding): PlotTaskResult[] {
-  return Object.entries(landing.taskRaw ?? {}).map(([taskId, raw], index) => ({
-    taskId,
-    taskName: taskId,
-    stage: 1,
-    order: index + 1,
-    success: true,
-    rawResponse: raw,
-  }));
 }
 
 /**
@@ -85,7 +72,7 @@ export async function migrateStashToQrf(ctx: { state: { chatKey: string | null }
     const saveContent = saveContentOfLanding(landing);
     if (saveContent === '') {
       failed += 1;
-      console.warn('[剧情推进助手] 迁移到 qrf：这一版没有逐任务回传，跳过', entry.floorId);
+      console.warn('[剧情推进助手] 迁移到 qrf：这一版没有标签数据可写，跳过', entry.floorId);
       continue;
     }
     try {
@@ -94,7 +81,6 @@ export async function migrateStashToQrf(ctx: { state: { chatKey: string | null }
         saveContent,
         presetName: landing.presetName,
         roundId: makeRoundId(),
-        taskResults: taskResultsOf(landing),
       });
       moved += 1;
       movedEntries.add(entry);
@@ -143,15 +129,15 @@ export async function migrateQrfToStash(ctx: { state: { chatKey: string | null }
     const plot = typeof extra[QRF_PLOT] === 'string' ? extra[QRF_PLOT] : '';
     if (plot.trim() === '') continue;
     const presetName = typeof extra[QRF_PLOT_PRESET] === 'string' ? extra[QRF_PLOT_PRESET] : '';
-    const rawTasks = extra[QRF_PLOT_TASKS];
-    const taskRaw: Record<string, string> = {};
-    if (rawTasks && typeof rawTasks === 'object' && !Array.isArray(rawTasks)) {
-      for (const [taskId, value] of Object.entries(rawTasks as Record<string, unknown>)) {
-        if (typeof value === 'string') taskRaw[taskId] = value;
-      }
-    }
     // 版本全文 = 楼层正文里的 `<plot>` 段；楼层没有 plot 段时退回 qrf 原文。
+    //
+    // 老 qrf 页面上的 `qrf_plot_tasks` 原话一并带进账本：新账不再写 taskRaw，但旧账
+    // 只有靠它才能把当时的标签数据恢复出来；下一次推进落盘后新账会覆盖成 taskTags。
     const finalText = plotSegmentOf(floor.message) ?? plot;
+    const rawTasks = extra[QRF_PLOT_TASKS_LEGACY];
+    const taskRaw = rawTasks && typeof rawTasks === 'object'
+      ? Object.fromEntries(Object.entries(rawTasks).filter(([, raw]) => typeof raw === 'string')) as Record<string, string>
+      : undefined;
     const landing: StashLanding = {
       id: makeLandingId(floor.message_id, now, []),
       createdAt: now,

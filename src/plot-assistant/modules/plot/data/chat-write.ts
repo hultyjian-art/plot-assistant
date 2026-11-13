@@ -11,7 +11,7 @@
  */
 
 import type { PlotTaskResult } from '../eng/assemble';
-import { QRF_PLOT, QRF_PLOT_PRESET, QRF_PLOT_TASKS, QRF_ROUND_ID, buildPlotWriteback, type PlotWriteback } from '../eng/writeback';
+import { QRF_PLOT, QRF_PLOT_PRESET, QRF_PLOT_TASKS_LEGACY, QRF_ROUND_ID, buildPlotWriteback, type PlotWriteback } from '../eng/writeback';
 
 /** 只取我们关心的那两个字段，避免把整条 `ChatMessage` 传进来又原样传回去。 */
 interface ChatMessageLike {
@@ -116,7 +116,8 @@ export async function clearPlotExtraFromFloor(messageId: number): Promise<boolea
   if (!current) throw new Error(`清 qrf 失败：读不到第 ${messageId} 层`);
   const extra = { ...(current.extra ?? {}) };
   let touched = false;
-  for (const key of [QRF_PLOT, QRF_PLOT_PRESET, QRF_PLOT_TASKS, QRF_ROUND_ID]) {
+  // 旧字段 QRF_PLOT_TASKS_LEGACY 也一起清：它已不再写入，但老楼层里可能还有，切模式时该摘干净。
+  for (const key of [QRF_PLOT, QRF_PLOT_PRESET, QRF_PLOT_TASKS_LEGACY, QRF_ROUND_ID]) {
     if (key in extra) {
       delete extra[key];
       touched = true;

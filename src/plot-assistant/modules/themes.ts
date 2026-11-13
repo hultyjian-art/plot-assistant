@@ -3,8 +3,7 @@
  *
  * 色值来自 ACU（数据库）v2 的内置主题 —— `D:\Github\_refs\shujuku\src\presentation-v2\theme\builtin-themes.ts`
  * 的 `ACU_V2_BUILTIN_THEMES`，一共五套：浅色 / 深色 / 奶油风 / 地雷色 / 奶龙配色。
- * 用户 2026-11-01 指定：全搬过来，默认用「奶龙配色」（ACU 那边它也是默认），
- * 原来那套白紫留着当第六个选项，等以后单独打磨。
+ * 第六套「星空神庙」由原来的白紫配色升级、打磨而成，是面板的默认主题。
  *
  * **只搬色**，不搬字体和圆角：
  *   - 字体：面板里混了中文正文和等宽代码框，ACU 的 `fontUi` 只写了西文字族，
@@ -30,17 +29,17 @@ export interface PanelTheme {
   vars: Record<string, string>;
 }
 
-/**
- * 默认主题。
- *
- * 面板第一次被打开时走这个值；老用户升级上来、`look.themeId` 还不存在时也走这个值。
- */
+/** 奶龙配色的主题 id，对应 `PANEL_THEMES` 第一项。 */
 export const MILK_DRAGON_THEME_ID = 'milk-dragon';
 
 /** 「星空神庙」的主题 id。 */
 export const STARRY_TEMPLE_THEME_ID = 'starry-temple';
 
-/** 默认主题（用户 2026-11-04 指定：星空神庙）。 */
+/**
+ * 默认主题（用户 2026-11-04 指定：星空神庙）。
+ *
+ * 面板第一次被打开时走这个值；老用户升级上来、`look.themeId` 还不存在时也走这个值。
+ */
 export const DEFAULT_THEME_ID = STARRY_TEMPLE_THEME_ID;
 
 export const PANEL_THEMES: readonly PanelTheme[] = [

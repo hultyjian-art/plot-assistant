@@ -47,6 +47,17 @@ export async function applyLandingToFloorMessage(floorId: number, finalText: str
   }
 }
 
+/** 把楼层正文恢复成指定文本 —— 面板保存的半途回滚用（不让聊天变量与楼层各说各话）。 */
+export async function restoreFloorText(floorId: number, text: string): Promise<StashApplyResult> {
+  try {
+    await setChatMessages([{ message_id: floorId, message: text }], { refresh: 'affected' });
+    return { ok: true };
+  } catch (error) {
+    console.error('[剧情推进助手] 回滚楼层正文失败', error);
+    return { ok: false, reason: String((error as Error)?.message ?? error) };
+  }
+}
+
 /** 把「用户原话 + 这一版」塞进输入框，并补一次 input 事件让酒馆自己重算高度。 */
 export function putLandingIntoInputBox(userText: string, finalText: string): StashApplyResult {
   const p$ = pageQuery();

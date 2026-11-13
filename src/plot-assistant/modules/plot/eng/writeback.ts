@@ -11,10 +11,10 @@
  *    整段替换。`finalMessage` 由 `buildFinalMessage()` 拼好（指令头 + `<plot>` 块）。
  *    写成追加会让下一轮 `$8`（本轮用户输入）把上一轮的 `<plot>` 也读进去。
  *
- * 2. **`qrf_plot` 存的是 `saveContent`（各任务原始回传），不是 `finalMessage`。**
- *    依据 `plot-task-engine.ts:1096`：`saveContent = buildPlotSaveContentFromTaskResults_ACU(...)`，
- *    `_set_tempPlotToSave_ACU({ content: saveContent, ... })`，最后落到 `target.qrf_plot`。
- *    存成 `finalMessage` 的话，下一轮 `$6` 读回来的会自带一层指令头，越滚越厚。
+ * 2. **`qrf_plot` 存的是**标签块**（`<标签>…</标签>` 若干段），不是 AI 原话、也不是整段成品。**
+ *    2026-11-12 用户拍板：qrf 只记一份标签数据，"AI 原话带思维链，直接复现会污染 $6"。
+ *    以前存 `buildSaveContent`（原始回传拼接）有问题——原话里的杂质会一起进 $6。
+ *    现在按 `buildTagBlock` 拼标签块，与楼层正文用的是同一套块格式。
  *
  * 3. **写进 `extra`，不写顶层。**
  *    ACU 写的是消息对象顶层字段，而 `getChatMessages()` 只还原七个字段（`message` 也在其中，
@@ -27,7 +27,8 @@ import type { PlotTaskResult } from './assemble';
 /** 写回的四个 qrf 字段名 + 一个「已处理」标记。**不要改**，外面脚本按名字读。 */
 export const QRF_PLOT = 'qrf_plot';
 export const QRF_PLOT_PRESET = 'qrf_plot_preset';
-export const QRF_PLOT_TASKS = 'qrf_plot_tasks';
+/** 旧字段，已不再写入（2026-11-12 起 qrf 只记标签块）。读端遇到它就当没有。 */
+export const QRF_PLOT_TASKS_LEGACY = 'qrf_plot_tasks';
 export const QRF_ROUND_ID = '_qrf_plot_round_id';
 export const QRF_PLOT_PROCESSED = '_plot_processed';
 
@@ -90,18 +91,12 @@ export function collectTaskRawResponses(taskResults: PlotTaskResult[] | null | u
 export function buildPlotWriteback(input: PlotWritebackInput): PlotWriteback {
   const extra: Record<string, unknown> = { ...(input.extra || {}) };
 
+  // saveContent 现在是「标签块」拼成的文本（2026-11-12 起），不再是 AI 原话。
   extra[QRF_PLOT] = String(input.saveContent ?? '');
   extra[QRF_PLOT_PRESET] = String(input.presetName ?? '');
   extra[QRF_ROUND_ID] = String(input.roundId || '');
   extra[QRF_PLOT_PROCESSED] = true;
 
-  const taskRaw = collectTaskRawResponses(input.taskResults);
-  const hasTasks = Object.keys(taskRaw).length > 0;
-  if (hasTasks) {
-    const previous =
-      extra[QRF_PLOT_TASKS] && typeof extra[QRF_PLOT_TASKS] === 'object' ? (extra[QRF_PLOT_TASKS] as Record<string, unknown>) : {};
-    extra[QRF_PLOT_TASKS] = { ...previous, ...taskRaw };
-  }
-
+  // 旧的 qrf_plot_tasks 不再写入；楼里原有的那份留着不动，读端会忽略它。
   return { message: String(input.finalMessage ?? ''), extra };
 }

@@ -39,9 +39,8 @@ export interface StashPortFile {
   /**
    * 孤儿区的账（楼层被删、对不上号的那些）。
    *
-   * 导出时带上是为了「这份文件就是完整备份」，但**导入时不会挂回去** ——
-   * 孤儿之所以是孤儿，就是因为它的楼层号已经不属于它了；换一个聊天同样没有归属。
-   * 面板会把「跳过了几条孤儿」说出来，不静默丢。
+   * 它们是完整备份的一部分，导入时原样恢复进目标账本的孤儿区；
+   * 目标已有孤儿时按内容去重后合并，具体规则见 `mergeOrphans`。
    */
   orphans: StashOrphan[];
 }
@@ -86,7 +85,51 @@ function cloneOrphan(orphan: StashOrphan): StashOrphan {
   return JSON.parse(JSON.stringify(orphan)) as StashOrphan;
 }
 
-/** 组装导出文件。`chatKey` 只作记录，导入时不用。 */
+/**
+ * 孤儿去重指纹：同一份文件原样再导一遍时，不把同一笔孤儿翻倍。
+ *
+ * 不能只拿 `originFloorId` 当身份：它是来源聊天里的楼层号，两个聊天都可能有第 10 层，
+ * 同号但内容不同的两笔孤儿都要留下。所以按整笔内容比对。
+ */
+function orphanFingerprint(orphan: StashOrphan): string {
+  return JSON.stringify([
+    orphan.originFloorId,
+    orphan.orphanedAt,
+    orphan.reason,
+    orphan.floorText,
+    orphan.presetName,
+    orphan.createdAt,
+    orphan.lastUsedAt,
+    orphan.activeLandingId,
+    orphan.state,
+    orphan.working,
+    orphan.landings,
+  ]);
+}
+
+/**
+ * 把文件里的孤儿并进目标账本。
+ *
+ * 合并规则（用户 m00935：导入要原样恢复孤儿区）：
+ * - 目标已有的孤儿全部保留，导入的按文件里的顺序接在后面；
+ * - 内容完全相同的只留一份，所以同一份文件重复导入不会翻倍；
+ * - 不按 `originFloorId` 覆盖：不同聊天可能有同一个楼层号，同号但内容不同也各自保留；
+ * - 这里不按 `ORPHAN_MAX` 截断。自动归档淘汰最旧是后台的正常行为，但导入是用户主动
+ *   恢复数据，截掉就等于把刚导进来的东西又丢了；后续再归档时会按原规则收敛。
+ */
+function mergeOrphans(current: StashOrphan[], incoming: StashOrphan[]): StashOrphan[] {
+  const merged = [...current];
+  const seen = new Set(current.map(orphanFingerprint));
+  for (const orphan of incoming) {
+    const fingerprint = orphanFingerprint(orphan);
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    merged.push(cloneOrphan(orphan));
+  }
+  return merged.length === current.length ? current : merged;
+}
+
+/** 组装导出文件。`stash` 必须是调用方当前内存里的最新账本（不是旧快照）；`chatKey` 只作记录，导入时不用。 */
 export function buildStashPortFile(stash: Stash, chatKey: string, now: number): StashPortFile {
   return {
     format: STASH_PORT_FORMAT,
@@ -158,6 +201,17 @@ export function parseStashPort(text: string): ParseOutcome {
   };
 }
 
+/** `working` 只认普通对象，字段是否像真进度交给 `hasWorkingProgress` 判。 */
+function normalizeWorking(value: unknown): StashEntry['working'] {
+  return isPlainObject(value) ? (value as unknown as StashEntry['working']) : null;
+}
+
+/** 只有 working、还没落过版的进行中账也是真账；但空对象不算。 */
+function hasWorkingProgress(working: StashEntry['working']): boolean {
+  if (!working) return false;
+  return Array.isArray(working.done) || Array.isArray(working.pending) || isPlainObject(working.taskTags);
+}
+
 function normalizeEntry(value: unknown): StashEntry | null {
   if (typeof value !== 'object' || value === null) return null;
   const record = value as Record<string, unknown>;
@@ -168,7 +222,10 @@ function normalizeEntry(value: unknown): StashEntry | null {
   const landings = record.landings
     .map(normalizeLanding)
     .filter((item): item is NonNullable<typeof item> => item !== null);
-  if (landings.length === 0) return null;
+  const working = normalizeWorking(record.working);
+  // 只有 working、还没落过版的进行中账也是真账（commitProgress 会先建 landings 为空的 entry），
+  // 不能因为没有 landing 就丢掉；但两样都没有就是空壳，仍然拒收。
+  if (landings.length === 0 && !hasWorkingProgress(working)) return null;
 
   const activeLandingId = typeof record.activeLandingId === 'string' ? record.activeLandingId : null;
   return {
@@ -180,7 +237,7 @@ function normalizeEntry(value: unknown): StashEntry | null {
     landings,
     // 指空了就当没选：`activeLanding()` 会退到最新那一版，不会崩。
     activeLandingId: landings.some(item => item.id === activeLandingId) ? activeLandingId : null,
-    working: record.working && typeof record.working === 'object' ? (record.working as StashEntry['working']) : null,
+    working,
     state: record.state === 'pending' ? 'pending' : 'complete',
   };
 }
@@ -190,18 +247,16 @@ function normalizeLanding(value: unknown): StashEntry['landings'][number] | null
   const record = value as Record<string, unknown>;
   const id = typeof record.id === 'string' ? record.id : '';
   if (id === '') return null;
-  const taskRaw: Record<string, string> = {};
-  if (record.taskRaw && typeof record.taskRaw === 'object') {
-    for (const [taskId, raw] of Object.entries(record.taskRaw as Record<string, unknown>)) {
-      if (typeof raw === 'string') taskRaw[taskId] = raw;
-    }
-  }
+  // 老导出文件里可能带着 2026-11-12 之前的 taskRaw：保留它，导入后还能恢复标签数据；
+  // 新账不写这个字段，读的时候也只在没有 taskTags 时才用它。
   return {
     id,
     createdAt: toNumber(record.createdAt, 0),
     finalText: typeof record.finalText === 'string' ? record.finalText : '',
     presetName: typeof record.presetName === 'string' ? record.presetName : '',
-    taskRaw,
+    taskRaw: record.taskRaw && typeof record.taskRaw === 'object'
+      ? Object.fromEntries(Object.entries(record.taskRaw).filter(([, raw]) => typeof raw === 'string')) as Record<string, string>
+      : undefined,
     taskTags: record.taskTags && typeof record.taskTags === 'object' ? (record.taskTags as StashEntry['landings'][number]['taskTags']) : undefined,
     // 从上一层继承的缺失标签：不带就丢了滚动带，低频任务换设备后仍会读不到上一轮
     carriedTags: record.carriedTags && typeof record.carriedTags === 'object' ? (record.carriedTags as StashEntry['landings'][number]['carriedTags']) : undefined,
@@ -223,7 +278,8 @@ function normalizeOrphan(value: unknown): StashOrphan | null {
   const landings = record.landings
     .map(normalizeLanding)
     .filter((item): item is NonNullable<typeof item> => item !== null);
-  if (landings.length === 0) return null;
+  const working = normalizeWorking(record.working);
+  if (landings.length === 0 && !hasWorkingProgress(working)) return null;
   return {
     originFloorId,
     orphanedAt: toNumber(record.orphanedAt, 0),
@@ -234,7 +290,7 @@ function normalizeOrphan(value: unknown): StashOrphan | null {
     lastUsedAt: toNumber(record.lastUsedAt, 0),
     landings,
     activeLandingId: typeof record.activeLandingId === 'string' ? record.activeLandingId : null,
-    working: record.working && typeof record.working === 'object' ? (record.working as StashEntry['working']) : null,
+    working,
     state: record.state === 'pending' ? 'pending' : 'complete',
   };
 }
@@ -300,26 +356,35 @@ export function planStashImport(file: StashPortFile, targets: ImportTarget[], st
  * 两笔挤一起会让 `getEntry()` 分不清该用哪个。
  */
 export function applyStashImport(stash: Stash, file: StashPortFile, plan: ImportPlan, now: number): Stash {
-  if (plan.pairs.length === 0) return stash;
+  const hasPairs = plan.pairs.length > 0;
+  const hasOrphans = file.orphans.length > 0;
+  if (!hasPairs && !hasOrphans) return stash;
 
-  const bySource = new Map(file.entries.map(entry => [entry.floorId, entry]));
-  const replaced = new Set(plan.pairs.map(pair => pair.targetFloorId));
-  const kept = stash.entries.filter(entry => !replaced.has(entry.floorId));
+  let entries = stash.entries;
+  if (hasPairs) {
+    const bySource = new Map(file.entries.map(entry => [entry.floorId, entry]));
+    const replaced = new Set(plan.pairs.map(pair => pair.targetFloorId));
+    const kept = stash.entries.filter(entry => !replaced.has(entry.floorId));
 
-  const imported: StashEntry[] = [];
-  for (const pair of plan.pairs) {
-    const source = bySource.get(pair.sourceFloorId);
-    if (!source) continue;
-    imported.push({
-      ...source,
-      floorId: pair.targetFloorId,
-      // 正文换成目标那一层的：认领时按开头十个字比，挂过去就是「同一段输入」
-      floorText: pair.targetText,
-      lastUsedAt: now,
-    });
+    const imported: StashEntry[] = [];
+    for (const pair of plan.pairs) {
+      const source = bySource.get(pair.sourceFloorId);
+      if (!source) continue;
+      imported.push({
+        ...source,
+        floorId: pair.targetFloorId,
+        // 正文换成目标那一层的：认领时按开头十个字比，挂过去就是「同一段输入」
+        floorText: pair.targetText,
+        lastUsedAt: now,
+      });
+    }
+
+    // 合并后统一按楼层号升序：`trimEntries` 只在超过三层时才排序，三层以内原样返回，
+    // 于是「按配对顺序拼起来的」那一摞会变成 7、6、5。排一次，面板上看着才是从上到下。
+    entries = trimEntries([...kept, ...imported].sort((a, b) => a.floorId - b.floorId));
   }
 
-  // 合并后统一按楼层号升序：`trimEntries` 只在超过三层时才排序，三层以内原样返回，
-  // 于是「按配对顺序拼起来的」那一摞会变成 7、6、5。排一次，面板上看着才是从上到下。
-  return { ...stash, entries: trimEntries([...kept, ...imported].sort((a, b) => a.floorId - b.floorId)) };
+  const orphans = hasOrphans ? mergeOrphans(stash.orphans, file.orphans) : stash.orphans;
+  if (entries === stash.entries && orphans === stash.orphans) return stash;
+  return { ...stash, entries, orphans };
 }

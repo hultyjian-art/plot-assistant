@@ -303,7 +303,7 @@ function readPromptContent(record: Loose, id: string): string {
   return '';
 }
 
-/** 最终注入指令：`finalSystemDirective → finalDirective → prompts` 三级回退。 */
+/** 最终注入指令：两级回退 `finalSystemDirective → finalDirective`（第三级 `prompts` 已移除）。 */
 function readFinalDirective(record: Loose): string {
   const top = text(record.finalSystemDirective) || text(record.finalDirective);
   return top || readPromptContent(record, 'finalSystemDirective');

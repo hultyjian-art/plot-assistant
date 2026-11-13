@@ -12,6 +12,7 @@
  * - **对不上就进孤儿区，不猜、不覆盖**。用户随时能把孤儿恢复成新楼层。
  */
 import type { PlotTaskResult } from './eng/assemble';
+import { scanTagBlocks } from './stash-edit';
 
 /** 一次完整的落盘成果。一封楼层最多两份。 */
 export interface StashLanding {
@@ -23,8 +24,12 @@ export interface StashLanding {
   finalText: string;
   /** 本次落盘用到的预设名 */
   presetName: string;
-  /** 逐任务的原始回传，按任务 id 索引（用于「只跑没完成的任务」） */
-  taskRaw: Record<string, string>;
+  /**
+   * 2026-11-12 之前落盘的老账才有：逐任务的原始回传。
+   * 新账不再写它，只用来给老账恢复标签数据（见 `legacyTaskTagsOfLanding`）。
+   */
+  taskRaw?: Record<string, string>;
+
   /**
    * 这一版里每个任务各自产出了哪些标签。**老账没有这个字段**，读的时候按空处理。
    *
@@ -65,7 +70,7 @@ export interface StashLanding {
 export interface WorkingTaskTags {
   /** 这个任务抽出来的标签：名 → 内容 */
   tags: Record<string, string>;
-  /** 只进字段、不进正文的标签名 */
+  /** 记进「只进字段」名单的标签名（只作标注与旧账兜底，不决定正文注入） */
   injectOnly: string[];
 }
 
@@ -175,7 +180,7 @@ export function attachLandingsToChat(
       ...message,
       qrf_plot: plotText,
       qrf_plot_preset: presetName,
-      qrf_plot_tasks: { ...landing.taskRaw },
+      // 2026-11-12 起不再贴 qrf_plot_tasks：qrf 只记一份标签块。
     };
   });
 }
@@ -230,13 +235,54 @@ export function collectStashTagMap(
   return map;
 }
 
+/**
+ * 一版成果的「存档正文」= 标签数据拼成的标签块。
+ *
+ * 2026-11-12 起只从**标签数据**拼。以前从 `taskRaw`（AI 原话）拼，原话里可能带模型
+ * 思维链等杂质，喂给 `$6` 会一起污染提示词；标签块干净、且与楼层正文同一种形状。
+ *
+ * 没有标签数据的版本（老账 / 只跑失败任务的版本）返回空串 —— 宁可空，也不拿原话充数。
+ */
 export function saveContentOfLanding(landing: StashLanding): string {
-  const pairs = Object.entries(landing.taskRaw ?? {}).filter(
-    ([, text]) => typeof text === 'string' && text.trim() !== '',
-  );
-  if (pairs.length === 0) return '';
-  if (pairs.length === 1) return pairs[0][1].trim();
-  return pairs.map(([taskId, text]) => `【剧情任务：${taskId}】\n${text.trim()}`).join('\n\n');
+  return tagBlocksOfLanding(landing);
+}
+
+/**
+ * 从暂存账本取「上一层」的标签块文本，供升级模式的 `$6` 用。
+ *
+ * 为什么不走「先贴到 qrf_plot 再读」那条老路（用户 2026-11-12 的原话）：
+ * 「升级模式下都不写入 qrf，怎么能固定读 qrf plot？」——楼层里本来就没有 qrf，
+ * 只为读它而临时伪造一份，属于自找麻烦。
+ *
+ * 取数口径与 `collectStashTagMap` 完全一致：只看更早楼层、遇到第一层有标签的就停，
+ * 所以两个消费者（`{{标签}}` 投影与 `$6`）看到的是同一层的数据。
+ *
+ * @param currentFloorId 这一轮锚在哪一楼；只认楼层号更小的层。
+ * @returns 拼好的标签块文本；没有数据时返回空串（`$6` 就是空）。
+ */
+export function tagBlocksFromStash(stash: Stash | null | undefined, currentFloorId: number): string {
+  const map = collectStashTagMap(stash, currentFloorId);
+  const blocks: string[] = [];
+  for (const [name, contents] of map) {
+    for (const content of contents) {
+      if (typeof content !== 'string' || content.trim() === '') continue;
+      blocks.push(`<${name}>${content}</${name}>`);
+    }
+  }
+  return blocks.join('\n\n');
+}
+
+/** 一版成果的标签数据拼成 `<标签>…</标签>` 块；没有标签数据时返回空串。 */
+export function tagBlocksOfLanding(landing: StashLanding): string {
+  const records = taskTagRecordsOfLanding(landing);
+  const blocks: string[] = [];
+  for (const record of Object.values(records)) {
+    for (const [name, content] of Object.entries(record?.tags ?? {})) {
+      if (typeof content !== 'string' || content.trim() === '') continue;
+      blocks.push(`<${name}>${content}</${name}>`);
+    }
+  }
+  return blocks.join('\n\n');
 }
 
 // ───────────────────────── 账本维护 ─────────────────────────
@@ -392,8 +438,8 @@ export function landingGap(
   presentTags: Iterable<string>,
   options?: LandingGapOptions,
 ): LandingGap {
-  const saved = landing.taskTags;
-  if (!saved || typeof saved !== 'object') return { tags: [], taskIds: [] };
+  const saved = taskTagsOfLanding(landing);
+  if (Object.keys(saved).length === 0) return { tags: [], taskIds: [] };
 
   const present = new Set<string>();
   for (const name of presentTags) {
@@ -613,10 +659,79 @@ export function mergeTaskTagRecords(
   return out;
 }
 
+/** 老账恢复出来的记录放在这个任务名下：它不在当前预设里，但必须能继续继承。 */
+export const LEGACY_TASK_ID = '__legacy__';
+
+/**
+ * 老账没有 `taskTags` 时，从 `taskRaw`（旧版逐任务原始回传）和 `finalText` 里把标签块扫回来。
+ *
+ * 这是给 2026-11-12「标签数据成为唯一主源」之前落盘的旧聊天用的兼容层：旧版砍掉
+ * `taskRaw` 时没有迁移旧账，导致旧账的面板没有账本格子、保存时也传不出任何标签记录，
+ * 世界书就会一直停在旧内容。
+ *
+ * 口径：`finalText` 是用户实际看到的投影，同名标签以它为准；`taskRaw` 只补它没有的。
+ * 没有 `taskRaw` 的老账至少还能从正文恢复出正文标签。
+ */
+export function legacyTaskTagsOfLanding(landing: StashLanding | null | undefined): Record<string, WorkingTaskTags> {
+  const out: Record<string, WorkingTaskTags> = {};
+  if (!landing) return out;
+
+  const textTags = new Map<string, { name: string; content: string }>();
+  for (const block of scanTagBlocks(landing.finalText)) {
+    const name = String(block.tag ?? '').trim();
+    const content = String(block.body ?? '');
+    if (!name || content.trim() === '') continue;
+    textTags.set(name.toLowerCase(), { name, content });
+  }
+
+  const put = (taskId: string, name: string, content: string): void => {
+    const record = out[taskId] ?? { tags: {}, injectOnly: [] };
+    record.tags[name] = content;
+    out[taskId] = record;
+  };
+
+  for (const [taskId, raw] of Object.entries(landing.taskRaw ?? {})) {
+    if (typeof raw !== 'string' || raw.trim() === '') continue;
+    for (const block of scanTagBlocks(raw)) {
+      const name = String(block.tag ?? '').trim();
+      const content = String(block.body ?? '');
+      if (!name || content.trim() === '') continue;
+      // 先按原任务记下；同名正文标签在后面覆盖它，保证 finalText 是最终投影。
+      put(taskId || LEGACY_TASK_ID, name, content);
+    }
+  }
+
+  for (const { name, content } of textTags.values()) {
+    let owner = '';
+    for (const [taskId, record] of Object.entries(out)) {
+      if (Object.keys(record.tags).some((key) => key.toLowerCase() === name.toLowerCase())) {
+        owner = taskId;
+        break;
+      }
+    }
+    put(owner || LEGACY_TASK_ID, name, content);
+  }
+  return out;
+}
+
+/**
+ * 一版成果自己的标签数据：新账直接读 `taskTags`，老账才现扫 `taskRaw` / `finalText`。
+ *
+ * 必须走这个入口而不是 `landing.taskTags ?? {}`：老账没有字段不代表没有标签，
+ * 直接当空会让面板、缺口核算、世界书同步全都看不见旧版内容。
+ */
+export function taskTagsOfLanding(landing: StashLanding | null | undefined): Record<string, WorkingTaskTags> {
+  if (!landing) return {};
+  if (landing.taskTags && typeof landing.taskTags === 'object' && Object.keys(landing.taskTags).length > 0) {
+    return landing.taskTags;
+  }
+  return legacyTaskTagsOfLanding(landing);
+}
+
 /** 一版成果的完整标签记录：从上一层继承的缺失标签 + 本版产出（本版同名标签优先）。 */
 export function taskTagRecordsOfLanding(landing: StashLanding | null | undefined): Record<string, WorkingTaskTags> {
   if (!landing) return {};
-  return mergeTaskTagRecords(landing.carriedTags, landing.taskTags);
+  return mergeTaskTagRecords(landing.carriedTags, taskTagsOfLanding(landing));
 }
 
 /** 一封楼层账的完整标签记录：优先读当前成果，没成果时退回工作区里累计的标签。 */
@@ -647,7 +762,9 @@ export function carryMissingTaskTags(
   }
   const carried: Record<string, WorkingTaskTags> = {};
   for (const [taskId, record] of Object.entries(previousRecords)) {
-    if (liveTaskIds && !liveTaskIds.has(taskId)) continue;
+    // 老账恢复出来的 `__legacy__` 不是当前预设里的任务，但它承载的旧标签必须继续滚动，
+    // 否则用户刚在旧楼层上恢复出来的 WF/DJ/TW 到下一楼层就断了。
+    if (liveTaskIds && taskId !== LEGACY_TASK_ID && !liveTaskIds.has(taskId)) continue;
     const tags: Record<string, string> = {};
     for (const [name, content] of Object.entries(record.tags ?? {})) {
       if (!name || present.has(name)) continue;

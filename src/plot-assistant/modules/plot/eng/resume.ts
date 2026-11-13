@@ -33,7 +33,7 @@ export interface ResumePlan<T extends ResumeTaskLike> {
   skippedTaskIds: string[];
   /** 已完成任务留下的标签，直接拿去当阶段接力的起点 */
   relayTagMap: TagMap;
-  /** 已完成任务里「只进字段不进正文」的标签名 */
+  /** 已完成任务里记进「只进字段」名单的标签名（只作标注，不决定正文注入） */
   injectedTagNames: Set<string>;
 }
 

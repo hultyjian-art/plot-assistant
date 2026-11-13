@@ -26,7 +26,7 @@ import { resolveChatStateStore } from './data/chat-vars';
 import { PLOT_WB_WRITE_PREFIX } from './data/worldbook-hits';
 import { buildTagBlock, hasContent, lookupTag } from './eng/tags';
 import { createWbWriteLedger, type WbWriteLedger } from './state';
-import { collectTextTagMap } from './stash-edit';
+import type { WorkingTaskTags } from './stash-model';
 import { readCharacterKey } from '../tavern';
 import { resolveWorldbookBooks } from './worldbook-select';
 import type { PlotSettings, PlotWorldbookWriteRule, RerushContext } from '../types';
@@ -134,6 +134,50 @@ export function collectLandingContents(
     const resolved = lookupTag(aggregatedTags, rule.tagName);
     if (!resolved.found || !hasContent(resolved.value)) continue;
     const block = buildTagBlock(rule.tagName, resolved.value);
+    if (block.trim() === '') continue;
+    out[rule.tagName] = block;
+  }
+  return out;
+}
+
+/**
+ * 暂存区「标签数据」按规则挑出要写世界书的内容。
+ *
+ * 与 collectLandingContents 的差别：这里读的是结构化记录（含空串 tombstone），
+ * 不是一段文本。空串表示「这一版明确删掉了这个标签」，会生成 tagName:'' 的
+ * 清空指令，交给 runWorldbookSync 删掉对应条目；记录里完全没出现的标签不动，
+ * 仍按账本旧内容重放（只同步这一版实际改过的标签）。
+ */
+export function collectRuleContentsFromRecords(
+  rules: PlotWorldbookWriteRule[],
+  records: Record<string, WorkingTaskTags> | null | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!records || typeof records !== 'object') return out;
+
+  // 按任务记录顺序合并同名标签：后面的记录覆盖前面的，空串也参与覆盖（tombstone 生效）。
+  const values = new Map<string, string>();
+  const originalNames = new Map<string, string>();
+  for (const record of Object.values(records)) {
+    for (const [name, content] of Object.entries(record?.tags ?? {})) {
+      if (typeof content !== 'string') continue;
+      const lower = name.toLowerCase();
+      originalNames.set(lower, name);
+      values.set(lower, content);
+    }
+  }
+
+  for (const rule of rules) {
+    if (rule.enabled !== true) continue;
+    if (plotWbFullEntryName(rule) === '') continue;
+    const lower = rule.tagName.toLowerCase();
+    if (!values.has(lower)) continue;
+    const content = values.get(lower) ?? '';
+    if (!content.trim()) {
+      out[rule.tagName] = '';
+      continue;
+    }
+    const block = buildTagBlock(originalNames.get(lower) ?? rule.tagName, content);
     if (block.trim() === '') continue;
     out[rule.tagName] = block;
   }
@@ -391,25 +435,30 @@ export function enqueueWorldbookLanding(
 }
 
 /**
- * 暂存区编辑同步（2026-11-08 批 45 用户定）：面板把「使用中」的那一版改完保存、
- * 或把某一版切到楼层（应用）成功后调用，把这一版文本里的规则标签块并进账本重放。
+ * 暂存区编辑同步（2026-11-08 批 45，2026-11-12 批 91 改为结构化记录）：
+ * 面板把「使用中」的那一版改完保存、或把某一版切到楼层（应用）成功后调用，
+ * 把这一版**标签数据**里命中的规则标签同步进世界书。
  *
- * 口径（批 45 四问拍板）：
- * - **只同步正在使用的版本** —— 世界书跟楼层里正在生效的那份走；改旧版只落暂存账，
- *   免得没在用的一版被注进世界书。
- * - 编辑后的文本里被删掉的标签块**不萷新内容**，账本里留的旧内容照常重放 ——
- *   世界书条目保留（缺口提示会重跑补回这块，补回后落盘钩子自然覆盖）。
- * - 与落盘钩子同一个合并语义：这一版有的标签覆盖账本同名内容，其余标签不动。
- *
- * 后台排队执行（与落盘写入同一支队列）；文本里没有规则标签时 fresh 为空，
- * 走一遍重放也无害（没有要改的条目就不会动书文件）。
+ * 口径：
+ * - **只同步正在使用的版本** —— 世界书跟楼层里正在生效的那份走；改旧版只落暂存账。
+ * - 传合并后的结构化记录（carriedTags + taskTags），不传一段拼出来的文本；
+ *   这样做保留了标签归属，也覆盖只进字段 / 只写世界书的标签。
+ * - 空串是 tombstone（这一版明确删掉了这个标签），会清掉对应世界书条目；
+ *   记录里没出现的标签不动，仍按账本旧内容重放。
+ * - 后台排队执行，与落盘写入同一支队列。
  */
-export function enqueueWorldbookStashText(ctx: RerushContext, text: string): void {
+export function enqueueWorldbookStashRecords(
+  ctx: RerushContext,
+  records: Record<string, WorkingTaskTags> | null | undefined,
+): void {
   const plot = ctx.settings.plot;
   if (!plot.enabled) return;
   const rules = rulesOf(plot);
   if (rules.length === 0) return;
-  const fresh = collectLandingContents(rules, collectTextTagMap(text));
+  // 没有任何标签记录时不要跑同步：fresh 为空会让 runWorldbookSync 按账本旧内容重放，
+  // 而调用方本意只是「这一版没有可同步的标签」，不该误删或误写任何条目。
+  if (!records || Object.keys(records).length === 0) return;
+  const fresh = collectRuleContentsFromRecords(rules, records);
   void enqueueSync(() => runWorldbookSync(ctx, fresh)).catch((error) => {
     console.warn('[剧情推进助手] 暂存区编辑同步世界书失败', error);
   });

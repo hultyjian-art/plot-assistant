@@ -7,7 +7,8 @@
  * 这里决定的是「哪些标签最终进正文、放在哪」。**这一处与 ACU 有意不同**（见施工方案 §13.4）：
  *   - 正文里出现哪个标签，完全由模板里的 `{{标签}}` 决定；**模板没写的标签一律不注入**
  *     （ACU 原行为是「没写到模板里的自动追加到末尾」，会把后台记录也塞进正文）
- *   - `extractInjectTags` 的标签即使模板里写了也不注入，只留在字段里
+ *   - `extractInjectTags` 的标签同样进入 `extractedTags` 与聚合表，模板写了就会注入。
+ *     `injectOnlyTagNames` 只供日志/暂存区记账，不构成正文过滤。
  *   - 一个标签都没抽到时退回任务原文，否则内容全丢
  */
 import { buildTagBlock, hasContent, lookupTag, normalizeAdjacentTagNewlines, normalizePositiveInteger, normalizeTagBlockNewlines, type TagMap } from './tags';
@@ -47,7 +48,7 @@ export function sortTaskResults(results: ReadonlyArray<PlotTaskResult | null | u
  * 把每个任务提取到的标签按名字聚到一起。
  *
  * 同一标签被多个任务产出时按「阶段 → 序号」的顺序追加，段落之间后面会用空行拼起来。
- * 只收成功的任务；同时汇总哪些标签名属于 injectOnly（那批不进正文）。
+ * 只收成功的任务；同时汇总记进「只进字段」名单的标签名（供日志/暂存区标注，不决定正文注入）。
  */
 export function aggregateTaskTags(taskResults: ReadonlyArray<PlotTaskResult | null | undefined>): {
   aggregated: Map<string, string[]>;
@@ -115,6 +116,22 @@ export function buildSaveContent(taskResults: ReadonlyArray<PlotTaskResult | nul
   return buildRawFallbackText(taskResults);
 }
 
+/**
+ * 存档用正文（qrf 模式写进 `qrf_plot` 的那份）= 标签块拼成的文本。
+ *
+ * 2026-11-12 用户拍板：qrf 里只记一份**标签数据**，不记 AI 原始回传。
+ * 理由（用户原话）：「原始回传里还带着模型的思维链等信息，直接复现原始回传也污染 $6」。
+ *
+ * 与 `buildRawFallbackText` 的区别：那个拼的是每个任务的原话（可能带思考过程、
+ * 可能带半截格式），这个拼的是抽好的、干净的标签块，和楼层正文里的块同一种形状。
+ *
+ * 一个标签都没有时退回任务原文 —— 总比给 $6 一个空串好（下一轮就完全读不到上一轮了）。
+ */
+export function buildSaveTagBlocks(aggregatedTags: TagMap): string {
+  if (!(aggregatedTags instanceof Map) || aggregatedTags.size === 0) return '';
+  return buildAggregatedBlocks(aggregatedTags);
+}
+
 /** 占位符模板：`{{标签}}`。只认 ASCII 名（与上游一致，中文标签名不算占位符）。 */
 const PLACEHOLDER_PATTERN = /\{\{(\w+)\}\}/g;
 
@@ -122,7 +139,7 @@ const PLACEHOLDER_PATTERN = /\{\{(\w+)\}\}/g;
  * 拼最终的 `<plot>` 注入内容。
  *
  * **严格模式（与 ACU 有意不同）**：正文里出现什么，完全由模板里的 `{{标签}}` 决定。
- * 模板没写的标签不注入 —— 这样「只存字段、不进正文」的后台记录才真的不占正文 token。
+ * 模板没写的标签不注入 —— 这条对汇总表里的所有标签一视同仁，与「只进字段」名单无关。
  *
  * @param finalSystemDirectiveContent 用户配置的最终注入模板；留空则用 DEFAULT_DIRECTIVE
  * @param taskResults 本轮所有任务回执

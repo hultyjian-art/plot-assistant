@@ -57,7 +57,7 @@ export interface LogTaskEntry {
   reasoning?: string;
   /** 抽到的标签名 */
   tags: string[];
-  /** 只进字段不进正文的标签名 */
+  /** 记进「只进字段」名单的标签名（只作日志标注，不决定正文注入） */
   injectOnlyTags: string[];
   startedAt: number;
   durationMs: number;

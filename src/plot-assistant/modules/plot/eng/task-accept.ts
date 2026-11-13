@@ -1,7 +1,7 @@
 /**
  * 任务回复的验收与重试 —— 移植自 ACU `plot-task-engine.ts` 的 `executeSinglePlotTask_ACU`（660-770 行）
  *
- * 一个任务的产出要过三道关才被认：**非空 → 够长（`minLength`）→ 命中 `extractTags` 里的全部标签**。
+ * 一个任务的产出要过三道关才被认：**非空 → 够长（`minLength`）→ 命中必达清单（抽取标签 + 只进字段，去掉豁免标签）里的全部标签**。
  * 不过就重试，重试**每次重发同一份 messages**（不是把上一轮的错误喂回去）。
  * `maxRetries` 次全废，任务判失败，整轮进程按 `stage-run` 的策略停下。
  *
@@ -23,7 +23,7 @@ export interface TaskAcceptanceSpec {
   minLength: number;
   /** 逗号分隔的标签名 */
   extractTags?: string;
-  /** 逗号分隔的「只进字段不进正文」标签名 */
+  /** 逗号分隔的「只进字段」名单（记账标注用，不决定正文注入） */
   extractInjectTags?: string;
   /**
    * 逗号分隔的豁免标签名（第 51 批新增）。
@@ -100,9 +100,11 @@ function extractSafely(text: string, spec: TaskAcceptanceSpec): TaskTagExtractio
 /**
  * 三道关。顺序不能换：先非空、再长度、最后标签。
  * 标签这一关按「抽取标签 + 只进字段」合并后的清单逐项核对：清单里列出的标签
- * 必须全部回传，少一个就算不合格、整条任务重试。只进字段只是「不进正文」，
- * 不是「可以不抽」—— 它同样要完整落盘。
+ * 必须全部回传，少一个就算不合格、整条任务重试。「只进字段」说的是它另外记一份名单，
+ * 不是「可以不抽」、也不是「不进正文」—— 它同样要完整落盘，模板写了照样进正文。
  * 豁免标签从必达清单里剔除，但仍在抽取组里：回传了就照常落盘，没回传也不判失败。
+ * 必达标签回传了但内容为空（含纯空白）也判失败：空标签不能糊弄成「已产出」，
+ * 更不能在后续世界书同步里被当成删除标记；确实允许不产出的标签请配豁免。
  * 没配任何必达标签时第三道关直接放行 —— 长度够了就算通过。
  */
 export function checkTaskResponse(rawResponse: string, spec: TaskAcceptanceSpec): TaskAcceptance {
@@ -119,7 +121,7 @@ export function checkTaskResponse(rawResponse: string, spec: TaskAcceptanceSpec)
     const extractedNames = new Set(Object.keys(extraction.extractedTags).map(tag => tag.toLowerCase()));
 
     // 必达清单 = 抽取标签 + 只进字段，去掉豁免标签。前两类都是任务要求产出的标签，
-    // 区别只在「进不进正文」，不在「抽不抽」；豁免标签则连「必须出现」都不要求。
+    // 区别只是后者多记一份名单，不在「抽不抽」、也不在「进不进正文」；豁免标签则连「必须出现」都不要求。
     const requiredTags = parseRequiredTags(spec?.extractTags, spec?.extractInjectTags, spec?.exemptTags);
     if (requiredTags.length > 0) {
       const missing = requiredTags.filter(tag => !extractedNames.has(tag));
@@ -127,6 +129,22 @@ export function checkTaskResponse(rawResponse: string, spec: TaskAcceptanceSpec)
         return {
           ok: false,
           reason: `任务回复缺少必需标签：${missing.join('、')}（要求：${requiredTags.join('、')}）。`,
+        };
+      }
+      // 2026-11-13 用户口径：必达标签回传空值（含纯空白）也算没完成。
+      // 空串不能作为「已产出」落盘，否则世界书同步会把它当删除标记；
+      // 确实允许某轮不产出的标签，应由预设配进豁免标签，而不是回空壳。
+      const contentByName = new Map(
+        Object.entries(extraction.extractedTags).map(([name, content]) => [name.toLowerCase(), content]),
+      );
+      const empty = requiredTags.filter(tag => {
+        const content = contentByName.get(tag);
+        return typeof content === 'string' && content.trim() === '';
+      });
+      if (empty.length > 0) {
+        return {
+          ok: false,
+          reason: `任务回复的必需标签为空：${empty.join('、')}（不允许空标签；确实不需要请配豁免标签）。`,
         };
       }
     }

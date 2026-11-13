@@ -204,6 +204,13 @@ export function resolvePromptGroup(source: Loose | null): PlotPromptSegment[] {
 
 const DEFAULT_MAX_RETRIES = 3;
 
+/** 按「源数据 → 兜底任务」两级取 `apiName` 字符串；两边都不是字符串就返回空串。 */
+function normalizeTaskApiName(primary: unknown, fallback: unknown): string {
+  const pick = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+  const own = pick(primary);
+  return own !== '' ? own : pick(fallback);
+}
+
 /**
  * 读任务上的触发周期与手动触发标记。
  *
@@ -215,12 +222,6 @@ const DEFAULT_MAX_RETRIES = 3;
  * 周期是「每几楼进行一次」，落成 0 会让 `shouldRunTask` 每轮都判成到期，落成 NaN 会让它永远判成没到期；
  * 手动标记只认严格 `true`，是面板「只写 true、关闭=删键」那套落盘纪律的入口把关。
  */
-function normalizeTaskApiName(primary: unknown, fallback: unknown): string {
-  const pick = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
-  const own = pick(primary);
-  return own !== '' ? own : pick(fallback);
-}
-
 function normalizeTaskSchedule(primary: unknown, fallback: unknown): TaskSchedule | null {
   const source = primary && typeof primary === 'object' ? (primary as Loose) : null;
   const backup = fallback && typeof fallback === 'object' ? (fallback as Loose) : null;

@@ -24,6 +24,7 @@ import type { TagMap } from './tags';
 import { normalizeRole, replacePlaceholders } from './tags';
 import type { PlotTask } from './task-model';
 import { isBlockEnabled } from './prompt-blocks';
+import { buildTagDiffInstruction, type TagDiffMode } from './tag-diff';
 import type { TavernPromptMacroSource } from '../../tavern';
 
 /** 渲染一个任务时，调用方要准备好的东西。全是「已经取好的值」，本层不碰数据源。 */
@@ -53,10 +54,28 @@ export interface TaskRenderContext {
    * 传了它就走异步渲染；不传时仍走上面的同步 `macroReplace`，老调用方不受影响。
    */
   templateProcess?: ((text: string, source: TavernPromptMacroSource) => Promise<string>) | null;
+  /** 预设级「标签名 → 差量模式」；有命中 blocks/table 时，按任务生成规则并顶在最前面。 */
+  tagDiffModes?: Record<string, TagDiffMode> | null;
 }
 
 /**
- * 提示词块一律按「斜杠命令」送进酒馆正则链，不按块上标的角色分流。
+ * 把本任务的差量规则顶到最前面。注入发生在 `{{标签}}` 替换之后，
+ * 所以规则里的占位符不会被当成内部标签清掉。
+ */
+function withTagDiffInstruction(
+  task: PlotTask | null | undefined,
+  messages: PlotRoundMessage[],
+  modes: Record<string, TagDiffMode> | null | undefined,
+): PlotRoundMessage[] {
+  if (messages.length === 0) return messages;
+  const instruction = buildTagDiffInstruction(task || {}, modes || {});
+  if (!instruction) return messages;
+  return [{ role: 'system', content: instruction, name: '标签差量规则' }, ...messages];
+}
+
+/**
+ * 异步渲染时提示词块一律按「斜杠命令」送进酒馆正则链，不按块上标的角色分流
+ * （同步版 `renderTaskMessages` 只做宏替换与占位符替换，不走正则链）。
  *
  * 块上的 SYSTEM / USER / ASSISTANT 只是这段提示词给 AI 看的「发言身份」，
  * 并不是酒馆里真实的用户输入或 AI 回复。拿它去套酒馆正则的
@@ -110,7 +129,7 @@ export function renderTaskMessages(task: PlotTask | null | undefined, context: T
       name: typeof (segment as { name?: unknown }).name === 'string' ? String((segment as { name?: string }).name) : '',
     });
   }
-  return messages;
+  return withTagDiffInstruction(task, messages, context.tagDiffModes);
 }
 
 /**
@@ -167,5 +186,5 @@ export async function renderTaskMessagesAsync(
       name: typeof (segment as { name?: unknown }).name === 'string' ? String((segment as { name?: string }).name) : '',
     });
   }
-  return messages;
+  return withTagDiffInstruction(task, messages, context.tagDiffModes);
 }

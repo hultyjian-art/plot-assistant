@@ -32,7 +32,7 @@ export interface TaskTagExtraction {
   extractedTags: Record<string, string>;
   /** `<标签>内容</标签>` 形式的片段 */
   injectedFragments: string[];
-  /** 只进字段、不进正文的那批标签 */
+  /** 记进「只进字段」名单的那批标签（只作标注，不决定正文注入） */
   injectOnlyTags: Record<string, string>;
   injectOnlyFragments: string[];
   injectOnlyTagNames: string[];
@@ -128,8 +128,8 @@ export function extractAllTags(text: string, rawTagName: string): string[] {
  * 按配置的两个标签名单从一次回传里提取内容。
  *
  * 关键规则：`extractInjectTags` 里的标签优先，同名（不分大小写）标签不会再被普通组提取一遍。
- * 这批标签同时进入 `extractedTags`（供跨任务传递），但被记进 `injectOnlyTagNames`——
- * 它们最终只进字段、不进正文。
+ * 这批标签同时进入 `extractedTags`（供聚合与 `{{标签}}` 占位符替换），另外记一份
+ * `injectOnlyTagNames` 供日志/暂存区标注；是否进正文只由模板里的 `{{标签}}` 决定。
  */
 export function extractTaskTags(text: string, extractTags: string, extractInjectTags: string = ''): TaskTagExtraction {
   const injectTagNames = splitTagNames(extractInjectTags);

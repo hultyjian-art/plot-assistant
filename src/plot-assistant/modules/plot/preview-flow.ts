@@ -41,7 +41,7 @@ import { collectKnownTagNames, tagsNeedingFullRefresh } from './eng/tag-diff';
 import { resolvePlotWorldbook } from './data/tavern-worldbook-scan';
 import { resolveChatStateStore } from './data/chat-vars';
 import { resolveChatKey } from './chat-key';
-import { attachLandingsToChat, collectStashTagMap } from './stash-model';
+import { collectStashTagMap, tagBlocksFromStash } from './stash-model';
 import { readWorldbookEntries, toPlotMessage } from './run-in-flow';
 import { processTavernTemplateText, readRoundIdentity, substituteTavernMacros } from '../tavern';
 import { presetImportOptions } from './preset-options';
@@ -108,11 +108,14 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
     readAnchorGap(anchorFloors, taskAnchorNames.get(taskId) ?? '');
   // 预览这一栏显示的是判定用的「第几条用户楼层」，不是绝对楼层号；日志才按绝对楼层号标识。
   const round = anchorFloors.filter((item) => item?.role === 'user').length + 1;
-  // 升级模式的上一轮成果在账本里、不在楼层字段上：和真跑那条链一样先贴回去，
-  // 否则"预览这次会发什么"里的 `$6` 会是空的，预览与实跑对不上。
+  // `$6` 分模式取值，与真跑那条链（run-in-flow）保持同一口径，否则预览与实跑对不上：
+  // 升级模式直接取暂存账本里上一层的标签数据，qrf 模式才从楼层 qrf_plot 读。
   const useStash = plotSettings.stashMode !== 'qrf';
   const stash = useStash ? resolveChatStateStore().loadStash(resolveChatKey(ctx.state.chatKey)).stash : null;
-  const historyChat = stash ? attachLandingsToChat(chat, rawChat as never, stash, config.name) : chat;
+  const historyChat = chat;
+  // 预览是「即将发出的新一层」的预演：楼层号取真实最后一楼 + 1，与真跑 nextUserFloorId() 主路同源。
+  const lastMessageId = Number(rawChat[rawChat.length - 1]?.message_id);
+  const previewFloorId = Number.isFinite(lastMessageId) ? lastMessageId + 1 : Number.POSITIVE_INFINITY;
   const hasTagRules = config.extractRules.length > 0 || config.excludeRules.length > 0;
   const historyDigest = buildHistoryDigest(
     pickHistoryMessages(
@@ -126,7 +129,9 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
       hasTagRules,
     ),
   );
-  const previousPlot = getPlotFromHistory(historyChat as never, {}, config.name);
+  const previousPlot = useStash
+    ? tagBlocksFromStash(stash, previewFloorId)
+    : getPlotFromHistory(historyChat as never, {}, config.name);
   const recentText = (historyLimit === 0 ? [] : rawChat.slice(-historyLimit))
     .map((item) => String(item.message ?? ''))
     .join('\n');
@@ -174,9 +179,6 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
   const knownTagNames = collectKnownTagNames(config.tasks, config.directiveTemplate);
   const historyTagMap = buildTagMap(String(previousPlot ?? ''), null, knownTagNames);
   // 与真跑（round.ts）同一口径：{{标签}} 优先看暂存区账本里的上一轮标签投影。
-  // 预览是「即将发出的新一层」的预演：楼层号取真实最后一楼 + 1，与真跑 nextUserFloorId() 主路同源。
-  const lastMessageId = Number(rawChat[rawChat.length - 1]?.message_id);
-  const previewFloorId = Number.isFinite(lastMessageId) ? lastMessageId + 1 : Number.POSITIVE_INFINITY;
   if (stash) collectStashTagMap(stash, previewFloorId).forEach((value, name) => historyTagMap.set(name, value));
   // 预览只读、不算续跑：`null` 起点给出的快照就是真跑「全新一轮」的那张接力表。
   const relayTagMap = buildResumePlan(config.tasks, null).relayTagMap;
@@ -190,6 +192,8 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
       // 预览要和真跑一致：宏与 EJS 也在发送前处理掉，否则用户看到的是 `{{char}}` 字面量。
       macroReplace: substituteTavernMacros,
       templateProcess: processTavernTemplateText,
+      // 差量规则也按任务注入，预览里必须能看到和真跑同样的一条 system。
+      tagDiffModes: config.tagDiffModes,
     });
     // 与真跑 `round.ts` 同一条差量格式提醒：上一轮标签格式和本轮模式对不上时，
     // 预览里也要看得见这句 system，否则用户照着预览放行、实际请求却多一条。

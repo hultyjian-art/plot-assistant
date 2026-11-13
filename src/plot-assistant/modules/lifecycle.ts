@@ -17,6 +17,11 @@ import { pageQuery, tavernGlobal, helperGlobal, pageToastr } from './tavern';
 import { MSG, TAG } from './copy';
 import { mountFloorSync } from './plot/floor-sync';
 import { enqueueWorldbookCheck } from './plot/worldbook-write';
+import {
+  applyStashLandingFromExternal,
+  type RerollStashApi,
+  type StashExternalApplyInput,
+} from './plot/stash-external-api';
 import { setCachedActivatedEntries } from './plot/data/tavern-worldbook-scan';
 import { mountManualButtons, type ManualTaskView } from './plot/manual-buttons';
 import { describePresetProblem, readPlotPreset } from './plot/data/acu-presets';
@@ -26,7 +31,6 @@ import { presetImportOptions } from './plot/preset-options';
 import { anchorNameOf } from './plot/floor-anchor';
 import type { RerushContext, TavernLike } from './types';
 
-/** 装载：抢占实例位、挂监听、装按钮与手势，退场时回收。 */
 export function bootstrap(ctx: RerushContext): void {
   let torn = false;
   /** chat_id_changed 的具名回调与它挂靠的事件源：退场时要按同一引用摘掉。 */
@@ -50,6 +54,13 @@ export function bootstrap(ctx: RerushContext): void {
   };
 
   ctx.state.instanceId = claimInstance(getScriptId(), teardown);
+
+  // 对外接口：供其他前端界面 / 脚本在改完暂存账本后，把「正在使用」的那一版同步进
+  // 楼层正文与世界书。全局只挂一个函数；脚本被新版顶替后，旧实例由实现层的
+  // isCurrentInstance 自我否决，不会拿着失效的 ctx 继续写。
+  initializeGlobal('RerollStashApi', {
+    applyStashLanding: (input: StashExternalApplyInput) => applyStashLandingFromExternal(ctx, input),
+  } satisfies RerollStashApi);
 
   logInfo(TAG.boot, MSG.booting);
   loadSettings(ctx);
@@ -101,7 +112,6 @@ export function bootstrap(ctx: RerushContext): void {
     offWorldInfoActivated.stop();
     offWorldInfoScanDone.stop();
   };
-
   const p$ = pageQuery();
   const tavern = tavernGlobal();
 

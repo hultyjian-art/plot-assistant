@@ -199,6 +199,8 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
       relayTagMap: relayTagMap ?? resume.relayTagMap,
       macroReplace: deps.macroReplace ?? null,
       templateProcess: deps.templateProcess ?? null,
+      // 差量规则要和回传合并用同一份配置：规则顶在任务消息最前面，实际按任务命中替换标签名。
+      tagDiffModes: config.tagDiffModes,
     };
     const messages = await renderTaskMessagesAsync(task, context);
 

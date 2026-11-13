@@ -1,5 +1,5 @@
 /**
- * 剧情推进 — 表格数据的文本格式化（$9 全量表 / $5 总体大纲 / $5 纪要索引）
+ * 剧情推进 — 表格数据的文本格式化（$5 总体大纲 / $5 纪要索引；$9 归 data/worldbook-hits.ts）
  *
  * 这一层只做「把已经拿到的表格 JSON 变成给 LLM 看的文字」，
  * 不碰世界书、不碰角色卡、不发请求 —— 取数在 data/ 层。
@@ -17,7 +17,7 @@ export interface PlotTableSheet {
 /** 所有表格，键是表格 id，值是表。 */
 export type PlotTablesJson = Record<string, PlotTableSheet | undefined>;
 
-/** $9 用的全量表格文本。 */
+/** 保留的上游对照实现：把整张表拼成文本；当前全仓零调用。 */
 export function formatTableDataForLLM(jsonData: PlotTablesJson | null | undefined): string {
   if (!jsonData || typeof jsonData !== 'object' || Object.keys(jsonData).length === 0) {
     return '当前无任何可用的表格数据。';

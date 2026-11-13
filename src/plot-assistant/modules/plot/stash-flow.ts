@@ -13,7 +13,7 @@
  */
 
 import type { PlotTaskResult } from './eng/assemble';
-import { extractTaskTags } from './eng/tags';
+import { collectTextTagMap, syncTextIntoTagRecords } from './stash-edit';
 import {
   ENTRY_MAX,
   ORPHAN_MAX,
@@ -30,6 +30,7 @@ import {
   sharesOpening,
   taskTagRecordsOfEntry,
   taskTagsFromResults,
+  taskTagsOfLanding,
   updateWorking,
   workingFromResults,
   type LandingGap,
@@ -94,6 +95,13 @@ export interface PlanStashRunResult {
   claim: StashClaimKind;
   /** 是不是「接着上次跑」 */
   resumed: boolean;
+}
+
+/** 重新开始一轮前清掉上一段输入的半成品进度；没有就不写盘。 */
+function clearEntryWorking(stash: Stash, entry: StashEntry): { stash: Stash; entry: StashEntry } {
+  if (!entry.working) return { stash, entry };
+  const cleared: StashEntry = { ...entry, working: null };
+  return { stash: upsertEntry(stash, cleared), entry: cleared };
 }
 
 /**
@@ -173,7 +181,9 @@ export function planStashRun(input: PlanStashRunInput): PlanStashRunResult {
   const claim = claimFloor(entry, input.floorText);
   if (claim.kind === 'landed') {
     // 这一层已经有一版完整成果。用户说得很清楚：完成之后再点发送就是重新开始一轮。
-    return { stash, entry, working: null, claim: 'landed', resumed: false };
+    // 旧的 working 必须清掉，否则 commitProgress 会把上一轮的 done/taskTags 又合并回来。
+    const cleared = clearEntryWorking(stash, entry);
+    return { stash: cleared.stash, entry: cleared.entry, working: null, claim: 'landed', resumed: false };
   }
 
   if (claim.kind === 'pending' && claim.reason === 'text_match' && entry.working) {
@@ -182,7 +192,7 @@ export function planStashRun(input: PlanStashRunInput): PlanStashRunResult {
     const allDone = planned.length > 0 && planned.every((id) => entry.working?.done.includes(id) === true);
 
     // 玩家可能把已完成任务的标签从正文里删掉了：那些任务不能再算「已完成」。
-    // 缺口口径完全复用 landingGap（含「只进字段的标签不算缺口」），把不齐的从 done 挪回 pending。
+    // 缺口口径完全复用 landingGap（主口径按必达清单逐个查实物），把不齐的从 done 挪回 pending。
     const gap = workingTagGap(
       entry,
       input.requiredTagsOfTask,
@@ -209,7 +219,9 @@ export function planStashRun(input: PlanStashRunInput): PlanStashRunResult {
   }
 
   // 其余情况（正文一致但没进度 / 正文改了但还没有成果 / 楼层结构不对劲）都当重新开始。
-  return { stash, entry, working: null, claim: claim.kind, resumed: false };
+  // 同上：旧 working 是上一段输入的半成品，不能让它污染这一轮。
+  const cleared = clearEntryWorking(stash, entry);
+  return { stash: cleared.stash, entry: cleared.entry, working: null, claim: claim.kind, resumed: false };
 }
 
 /**
@@ -218,11 +230,9 @@ export function planStashRun(input: PlanStashRunInput): PlanStashRunResult {
  * `StashWorking` 本身没有 `textTagNames`，就从这一层已落盘的某一版借「本该进正文的清单」；
  * 老账（没有这个字段）由 `landingGap` 自己退回「全部标签减 injectOnly」。
  *
- * **只认带成果的正文。** 这个核对回答的是「玩家把已落盘任务的标签删了吗」，
- * 前提是正文里确实摆着一份成果。点发送时递进来的正文是玩家的输入原文（没有 `<plot>`），
- * 里面本来就没有任何标签块 —— 照算的话每个标签都算「被删了」，所有已完成任务全部退回
- * 待跑，续跑就退化成每轮全量重发（用户 2026-11-11 报的正是这个）。正文里没有成果，
- * 就说明没人删过东西，缺口为空。
+ * **核对来源是暂存区，不读楼层正文。** 账本（这一层已落盘的标签）是「有没有产出过」的证据；
+ * 很多标签只写世界书、不进正文，拿正文对照必然误判（用户 2026-11-11）。
+ * 暂存区查不到时兜底查楼层的 qrf 字段，两处取并集再交给 `landingGap` 判缺口。
  */
 function workingTagGap(
   entry: StashEntry,
@@ -238,14 +248,13 @@ function workingTagGap(
     createdAt: 0,
     finalText: '',
     presetName: '',
-    taskRaw: {},
     complete: false,
     taskTags: working.taskTags ?? {},
     ...(textTagNames ? { textTagNames } : {}),
   };
   // 核对来源是**暂存区**（这一层进度里已经落盘的标签），不是楼层正文。
   // 很多标签只写世界书、根本不进正文，拿正文对照必然误判（用户 2026-11-11）。
-  const saved = collectSavedTagNames(working.taskTags);
+  const saved = collectSavedTagNames(working.taskTags, false);
   // 暂存区查不到 → 兜底查楼层的 qrf 字段（用户口径）。两处取并集：
   // 任意一边能证明「这个标签产出过」，就不该把它算成缺口。
   const present = qrfFallback
@@ -273,48 +282,12 @@ function collectQrfTagNames(
   return out;
 }
 
-/**
- * 从楼层的 `qrf` 字段兜底还原「某个任务已经产出过哪些标签」。
- *
- * 用户口径（2026-11-11）：核对先看暂存区，**暂存区查不到再兜底查 qrf 字段**。
- * 什么时候会查不到：账本被裁掉（只留最近三层）、换设备后账本没跟着过来、
- * 或者用户手动清过聊天变量 —— 而楼层里的 `qrf_plot_tasks` 还留着那一轮的原始回传。
- *
- * `qrf_plot_tasks` 存的是**每个任务的原始回传文本**（不是抽好的标签），
- * 所以要用这个任务自己的抽取名单重新抽一遍，抽到什么就算它产出过什么。
- */
-export function tagsFromQrfTaskRaw(
-  taskRaw: unknown,
-  extractTags?: string,
-  exemptTags?: string,
-  extractInjectTags?: string,
-): Set<string> {
-  const out = new Set<string>();
-  if (!taskRaw || typeof taskRaw !== 'object') return out;
-  const configured = [extractTags || '', exemptTags || '', extractInjectTags || '']
-    .filter((part) => part.trim() !== '')
-    .join(',');
-  if (configured.trim() === '') return out;
-  for (const raw of Object.values(taskRaw as Record<string, unknown>)) {
-    if (typeof raw !== 'string' || raw.trim() === '') continue;
-    try {
-      const extraction = extractTaskTags(raw, configured, '');
-      for (const [name, content] of Object.entries(extraction.extractedTags)) {
-        if (typeof content === 'string' && content.trim() !== '') out.add(name.toLowerCase());
-      }
-    } catch {
-      // 单条回传抽不出来不该连累整轮：跳过它，继续看别的任务。
-    }
-  }
-  return out;
-}
-
 /** 暂存区里这个任务已经落下实物的标签名（去重、小写）。 */
-function collectSavedTagNames(taskTags: Record<string, WorkingTaskTags> | undefined): Set<string> {
+function collectSavedTagNames(taskTags: Record<string, WorkingTaskTags> | undefined, requireContent = true): Set<string> {
   const out = new Set<string>();
   for (const record of Object.values(taskTags ?? {})) {
     for (const [name, content] of Object.entries(record?.tags ?? {})) {
-      if (typeof content !== 'string' || content.trim() === '') continue;
+      if (typeof content !== 'string' || (requireContent && content.trim() === '')) continue;
       out.add(name.toLowerCase());
     }
   }
@@ -491,7 +464,7 @@ export function commitLanding(input: CommitLandingInput): CommitLandingResult {
     createdAt: now,
     finalText: input.finalText,
     presetName: input.presetName,
-    taskRaw: collectTaskRaw(input.results),
+    // 2026-11-12 起不存原始回传（用户拍板：只留日志）。collectTaskRaw 随之停用。
     // 老账没这个字段，新落的都记上：日后用户删了某个标签块，才能反查该重跑谁
     ...(Object.keys(taskTags).length > 0 ? { taskTags } : {}),
     ...(Object.keys(carriedTags).length > 0 ? { carriedTags } : {}),
@@ -558,6 +531,8 @@ export interface EditLandingInput {
    * carriedTags 是继承来的历史快照，保存时原样不动（用户 2026-11-11 拍板）。
    */
   carriedEdits?: Record<string, string>;
+  /** 保存的是「使用中」的版本时，同步把它标成 activeLandingId，避免下一楼继承拿错版本。 */
+  activate?: boolean;
   now?: number;
 }
 
@@ -571,15 +546,19 @@ function carriedTaskIdsOf(carriedTags: Record<string, WorkingTaskTags> | undefin
   }
   return map;
 }
-
 /**
  * 不重跑、不新增版本：直接在原版上改。
  *
- * ledgerEdits 只动账本里本来就有这个标签名的记录 —— 用户删掉正文里的标签块、
- * 或清空了账本里某格，不该把新标签凭空塞进别的任务里。
- * carriedEdits 是另一条路：继承标签本来不在 taskTags 里，用户编辑过的行按
- * 「本层产出」写进对应任务的 taskTags（carriedTags 完全不动）。这样投影合并时
- * 本版同名标签覆盖旧版、下一楼继承也读到编辑后的内容（用户 2026-11-11 拍板）。
+ * **数据主源是标签数据，成品正文是它的投影**（2026-11-12 用户拍板）。所以保存分两步：
+ *
+ * 1. **正文 → 标签数据**：按正文里现在有哪些标签块重算一遍（缺的补、变了的更新、
+ *    正文里没了的删掉）。这一步让「在正文框里删标签块」真的生效——以前只写正文，
+ *    标签数据不动，下一楼层继承时又抄回去，用户删掉的东西会复活。
+ * 2. **格子编辑叠加**：账本格子与继承格子的编辑在正文差量**之后**应用。顺序不能反：
+ *    先叠加再用旧正文重算，会把用户刚改的内容冲掉（本轮实测踩到过）。
+ *
+ * ledgerEdits 只动本来就有这个标签名的记录；carriedEdits 按继承快照里的原任务 id
+ * 归组写进本层产出，carriedTags 本身完全不动（用户 2026-11-11 拍板）。
  */
 export function editLanding(input: EditLandingInput): { stash: Stash; entry: StashEntry } | null {
   const entry = getEntry(input.stash, input.floorId);
@@ -589,32 +568,52 @@ export function editLanding(input: EditLandingInput): { stash: Stash; entry: Sta
 
   const landings = entry.landings.slice();
   const landing = landings[index];
-  const savedTags = landing.taskTags;
   const ledgerEdits = input.ledgerEdits;
   const carriedEdits = input.carriedEdits;
   const hasCarriedEdits = !!carriedEdits && Object.keys(carriedEdits).length > 0;
+  const carriedTaskOf = carriedTaskIdsOf(landing.carriedTags);
+  const ownTags = taskTagsOfLanding(landing);
+  const fallbackTaskId = carriedTaskOf.values().next().value ?? Object.keys(ownTags)[0];
 
-  if ((ledgerEdits && savedTags) || hasCarriedEdits) {
-    const next: Record<string, WorkingTaskTags> = {};
-    for (const [taskId, record] of Object.entries(savedTags ?? {})) {
-      next[taskId] = { tags: { ...(record.tags ?? {}) }, injectOnly: [...(record.injectOnly ?? [])] };
+  // ── 第一步：正文 → 标签数据 ──
+  //
+  // 新账读 taskTags；老账没有这个字段，就从 taskRaw / finalText 现扫一份（taskTagsOfLanding）。
+  // 老账不再被跳过：否则面板里改正文、改账本格子都传不出任何记录，世界书永远停在旧内容。
+  let next: Record<string, WorkingTaskTags> | null = null;
+  if (landing.taskTags !== undefined || Object.keys(ownTags).length > 0) {
+    const synced = syncTextIntoTagRecords(ownTags, input.finalText, {
+      reassignTo: fallbackTaskId,
+      inheritedRecords: landing.carriedTags,
+      textTagNames: landing.textTagNames ?? [...collectTextTagMap(landing.finalText).keys()],
+      onlyKnownTags: landing.textTagNames === undefined,
+    });
+    next = synced.records;
+  }
+
+  // ── 第二步：格子编辑叠加在差量结果之上 ──
+  const hasLedgerEdits = !!ledgerEdits && Object.keys(ledgerEdits).length > 0;
+  if (next || hasLedgerEdits || hasCarriedEdits) {
+    if (!next) {
+      next = {};
+      for (const [taskId, record] of Object.entries(landing.taskTags ?? {})) {
+        next[taskId] = { tags: { ...(record.tags ?? {}) }, injectOnly: [...(record.injectOnly ?? [])] };
+      }
     }
     for (const [name, content] of Object.entries(ledgerEdits ?? {})) {
       for (const record of Object.values(next)) {
         if (!Object.prototype.hasOwnProperty.call(record.tags, name)) continue;
         if (content === '') {
-          delete record.tags[name];
-          const at = record.injectOnly.indexOf(name);
-          if (at >= 0) record.injectOnly.splice(at, 1);
+          // 空串 = 本层明确不再产出这个标签。保留空 tombstone，而不是删键：
+          // 删键会让下一层从 carriedTags 把旧内容捡回来，世界书同步也看不到「已删除」。
+          record.tags[name] = '';
         } else {
           record.tags[name] = content;
         }
       }
     }
     if (hasCarriedEdits) {
-      const taskOf = carriedTaskIdsOf(landing.carriedTags);
       for (const [name, content] of Object.entries(carriedEdits ?? {})) {
-        const taskId = taskOf.get(name);
+        const taskId = carriedTaskOf.get(name);
         if (!taskId) continue;
         if (!next[taskId]) next[taskId] = { tags: {}, injectOnly: [] };
         // 空串也写进去：本版同名标签覆盖旧版，投影 / 继承都会跳过空内容，
@@ -631,8 +630,10 @@ export function editLanding(input: EditLandingInput): { stash: Stash; entry: Sta
   } else {
     landings[index] = { ...landing, finalText: input.finalText };
   }
+
   const now = typeof input.now === 'number' && Number.isFinite(input.now) ? input.now : Date.now();
-  const updated: StashEntry = { ...entry, landings, lastUsedAt: now };
+  const edited: StashEntry = { ...entry, landings, lastUsedAt: now };
+  const updated = input.activate ? setActiveLanding(edited, landing.id) : edited;
   return { stash: upsertEntry(input.stash, updated), entry: updated };
 }
 
@@ -715,16 +716,6 @@ function mergeTaskTags(
     merged[taskId] = { tags: { ...(value.tags ?? {}) }, injectOnly: [...(value.injectOnly ?? [])] };
   }
   return merged;
-}
-
-function collectTaskRaw(results: PlotTaskResult[]): Record<string, string> {
-  const raw: Record<string, string> = {};
-  for (const result of results) {
-    if (!result || result.success !== true) continue;
-    if (typeof result.taskId !== 'string' || !result.taskId) continue;
-    raw[result.taskId] = typeof result.rawResponse === 'string' ? result.rawResponse : '';
-  }
-  return raw;
 }
 
 function dedupe(ids: string[]): string[] {

@@ -65,18 +65,21 @@ export type ImportPrep =
 /**
  * 读文件内容 → 校验 → 算配对计划。**不写账本**，冲突要不要覆盖由面板问用户。
  *
- * 一处刻意的取舍：源文件里一笔账都没有时直接报错，而不是返回一个空计划。
+ * 一处刻意的取舍：源文件里既没有账、也没有孤儿时直接报错，而不是返回一个空计划。
  * 空计划落到面板上就是「导入成功，但什么都没变」，用户没法分辨是文件坏了还是
  * 当前聊天没地方挂 —— 说清楚比装作成功好。
+ *
+ * 只有孤儿没有账的文件也要放行：孤儿不参与楼层配对，但它们是导出文件的一部分，
+ * 导入时要原样恢复进目标账本的孤儿区。
  */
 export function prepareStashImport(text: string, stash: Stash): ImportPrep {
   const parsed = parseStashPort(text);
   if (!parsed.ok) return { ok: false, error: parsed.error };
-  if (parsed.file.entries.length === 0) {
+  if (parsed.file.entries.length === 0 && parsed.file.orphans.length === 0) {
     return { ok: false, error: '这份文件里一笔暂存账都没有。' };
   }
   const plan = planStashImport(parsed.file, readImportTargets(), stash);
-  if (plan.pairs.length === 0) {
+  if (plan.pairs.length === 0 && parsed.file.orphans.length === 0) {
     return { ok: false, error: '这份文件里的账挂不到当前聊天的任何楼层上。' };
   }
   return { ok: true, file: parsed.file, plan };

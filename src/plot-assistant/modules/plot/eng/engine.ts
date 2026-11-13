@@ -14,8 +14,9 @@
  * ```
  *
  * 它**不碰**任何真实数据：消息怎么渲染、AI 怎么调、表格从哪读，全由调用方注入。
- * 这样做的原因很实际 —— 取数那半截要么依赖酒馆运行时（headless 测不了），
- * 要么还压着「决策点 7：表格怎么读」。编排逻辑先锁住，取数换实现时不用重测。
+ * 这样做的原因很实际 —— 取数那半截依赖酒馆运行时（headless 测不了）；决策点 7
+ * 早已定案（读 ACU 原生 `exportTableAsJson()`）并接进主流程。编排层只接线、不碰真实数据，
+ * 取数换实现时不用重测。
  *
  * ## 三条与直觉相反的行为（都是原版的，别掰）
  *
@@ -27,7 +28,7 @@
  *    「每次直接重发原任务消息，失败原因与次数仅用于本地诊断」）。
  */
 import { DEFAULT_RETRY_DELAY_MS } from '../../constants';
-import { aggregateTaskTags, buildFinalMessage, buildSaveContent, type PlotTaskResult } from './assemble';
+import { aggregateTaskTags, buildFinalMessage, buildSaveTagBlocks, type PlotTaskResult } from './assemble';
 import { runTasksByStage } from './stage-run';
 import { runTaskAttempts, type PlotApiReply } from './task-accept';
 import type { TagMap } from './tags';
@@ -396,6 +397,8 @@ export async function runPlotRound<T extends PlotRoundTask = PlotRoundTask>(
     aggregatedTags: outcome.aggregatedTags,
     injectedTagNames: outcome.injectedTagNames,
     injectedMessage: buildFinalMessage(finalDirectiveTemplate, outcome.successfulResults, outcome.aggregatedTags),
-    saveContent: buildSaveContent(outcome.successfulResults),
+    // 2026-11-12：存档正文改成「标签块」而不是「任务原话」——
+    // qrf 模式会把它写进 qrf_plot 给下一轮 $6 读，原话里的杂质会一起进去。
+    saveContent: buildSaveTagBlocks(outcome.aggregatedTags),
   };
 }
