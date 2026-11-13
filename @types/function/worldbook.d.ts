@@ -29,7 +29,7 @@ type CharWorldbooks = {
  *
  * @returns 角色卡绑定的世界书
  */
-declare function getCharWorldbookNames(character_name: TypeFest.LiteralUnion<'current' | string>): CharWorldbooks;
+declare function getCharWorldbookNames(character_name: TypeFest.LiteralUnion<'current', string>): CharWorldbooks;
 /**
  * 重新绑定角色卡世界书
  *

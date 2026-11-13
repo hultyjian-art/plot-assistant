@@ -17,12 +17,12 @@
 酒馆助手脚本区里新建一个脚本，内容只填下面这一行：
 
 ```javascript
-import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.2/dist/plot-assistant/index.js'
+import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.8/dist/plot-assistant/index.js'
 ```
 
 刷新酒馆，脚本会自己装上。
 
-> 链接里的 `@v1.0.2` 是版本号。**更新时只改这个数字**（比如换成 `@v1.0.3`）就能拉到新版本，文件路径永远不变。
+> 链接里的 `@v1.0.8` 是版本号。**更新时只改这个数字**（比如换成 `@v1.0.9`）就能拉到新版本，文件路径永远不变。
 
 ---
 
@@ -89,7 +89,8 @@ import 'https://cdn.jsdelivr.net/gh/hultyjian-art/plot-assistant@v1.0.2/dist/plo
 
 | 版本 | 说明 |
 |---|---|
-| **v1.0.2** | **当前推荐。** 补上 `$5`（总结纲要）的第三档：世界书里的「纪要索引」条目优先于表格。 |
+| **v1.0.8** | **当前推荐。** 同步开发仓库第 113~122 次改动（标签数据、世界书同步、断点续跑、暂存区编辑等修复）。 |
+| v1.0.2 | 补上 `$5`（总结纲要）的第三档：世界书里的「纪要索引」条目优先于表格。 |
 | v1.0.1 | 修复「上一轮的 `{{标签}}` 渲染成空壳」。 |
 | v1.0.0 | 首次发布。模板中写 `{{basic_info}}` 这类跨轮标签会渲染成空壳——**请不要用这个版本**。 |
 
