@@ -30,7 +30,7 @@ import type { PlotAppendResult } from './plot/run-in-flow';
 import { mountBubble } from './plot/send-gate';
 import { resolveChatKey } from './plot/chat-key';
 import { completePlotSend } from './plot/after-send';
-import { armSendBypass } from './plot/send-bypass';
+import { armSendBypass, cancelSendBypass } from './plot/send-bypass';
 import type { DeletePath, RerushContext, SendPath } from './types';
 
 /** 页面上"重新生成"这个按钮可能出现的文字（中文固定，英文忽略大小写）。 */
@@ -334,6 +334,9 @@ async function runRerushFlowCore(ctx: RerushContext, autoSend: boolean): Promise
       armSendBypass();
       // 删完即发：从手势到请求发出，这条链上只有删层那一次后端保存在等
       const sentBy = issueSend();
+      // 只有「按钮」这条路真的产生了一次 DOM click、会被拦截器消费掉通行证。
+      // 走「接口」直调或「落空」时没人来领证，立刻撤销，别让它残留到下一次真人点击（现象 a）。
+      if (sentBy !== '按钮') cancelSendBypass();
       logInfo(TAG.post, MSG.sendCommandIssued(sentBy));
       if (sentBy === '落空') {
         if (wantToast) toast?.error(MSG.toastSendMissed, '', { timeOut: TOAST_URGENT_MS });

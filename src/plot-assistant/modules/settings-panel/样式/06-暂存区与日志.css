@@ -631,6 +631,9 @@
   font-size: 12px !important;
   line-height: 1.5 !important;
   border-top: 1px solid var(--acu-border) !important;
+  /* 裸 pre 会被外界（美化包 / 主题 CSS）直接命中深色底；不钉死就会出现「深底深字」。
+     --acu-bg-1 = --rh-bg-pure，跟随主题明暗。 */
+  background: var(--acu-bg-1) !important;
   color: var(--acu-text-1) !important;
 }
 

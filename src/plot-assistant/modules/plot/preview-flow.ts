@@ -171,7 +171,9 @@ export async function previewPlotRound(ctx: RerushContext, userText = ''): Promi
   });
 
   const enabled = config.tasks.filter((task) => task.enabled !== false);
-  const selection = selectTasksForFloor(enabled, gapOf);
+  // 第 4 个参数把「这是第几条用户楼层」交给纯策略层（批104 第6条的起始用户楼层判定靠它）；
+  // 真跑链走 round.ts 不改签名，由调用方把它挂在任务的 schedule 上透传，两条链口径一致。
+  const selection = selectTasksForFloor(enabled, gapOf, undefined, round);
   // ── 历史标签表：上一轮 `<plot>` 里的 `<标签>内容</标签>` ──
   //
   // 与真跑路径（`round.ts`）同一张表：`{{标签}}` 查不到就吐 `<标签></标签>` 空壳，

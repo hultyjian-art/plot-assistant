@@ -75,6 +75,8 @@ export interface PlotApiEntryLike {
   bodyParams: string;
   /** 要剔掉的请求体参数名 */
   excludeBodyParams: string;
+  /** 关闭 API 工具调用（本脚本自己的开关，ACU 没有对应字段） */
+  disableToolCalls: boolean;
   /** 提示词后处理（ACU 的 `apiConfig.promptPostProcessing`，缺省时跟随酒馆） */
   promptPostProcessing: string;
 }
@@ -183,6 +185,9 @@ export function toPlotApiEntry(raw: unknown, ordinal: number): PlotApiEntryLike 
     bodyParams: apiMode === 'custom' && typeof config.bodyParams === 'string' ? config.bodyParams : '',
     excludeBodyParams:
       apiMode === 'custom' && typeof config.excludeBodyParams === 'string' ? config.excludeBodyParams : '',
+    // ACU 的 contextToolTransportEnabled 是「上下文工具化」的开关，与本脚本这个
+    // 「把宿主加的 tools 剔掉」不是同一件事；导入时一律按「不关」落盘，要关自己勾。
+    disableToolCalls: false,
     // 提示词后处理：ACU 存在 apiConfig 里，值是 ''/merge_tools/semi/strict/single。
     // 只在自定义模式下带过来 —— ACU 走「酒馆预设」模式时并不发这个字段，
     // 照搬过来会让我们多做一件它原本没做的事。缺省='跟随酒馆'，即完全不动。

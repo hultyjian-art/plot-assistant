@@ -406,10 +406,11 @@ export function isManagedWorldbookEntry(entry: Pick<WorldbookHitEntry, 'rawComme
 }
 
 /**
- * 这条「本来就不会进 `$1`」。
+ * 这条是不是「默认不勾」的条目（框架条目名 / 大纲表 / 纪要索引）。
  *
- * 面板上要标出这批条目（用户在勾选框里看得见它们、但勾不勾都不影响生成），
- * 所以判定必须和运行时用同一份 —— 这里抽出来，`createPlotFilters` 与面板都调它。
+ * 面板上要标出这批条目，运行时与面板共用同一份判定，都调它。
+ * 批 104 用户定：这批从「一律排除」改成「默认不勾、可以自己重新勾」，
+ * 真正进不进 $1 由 createPlotFilters 的 isSelected 结合 worldbookEntries 决定。
  */
 export function isFrameworkEntry(entry: Pick<WorldbookHitEntry, 'rawComment' | 'normalizedComment'>): boolean {
   const comment = String(entry.normalizedComment ?? '');
@@ -418,17 +419,19 @@ export function isFrameworkEntry(entry: Pick<WorldbookHitEntry, 'rawComment' | '
 }
 
 /**
- * 剧情推进专用的「进不进池」判定（对应 `plot-task-engine.ts:1333` 那组回调）。
+ * 剧情推进专用的「进不进池」判定（对应 plot-task-engine.ts:1333 那组回调）。
  *
- * 四处照抄：
- * - 大纲表条目与纪要索引条目**一律排除** —— 它们有专用占位符（`$5` 一族）。
- * - 名字含 `BLOCKED_NAME_KEYWORDS` 的**一律排除**（中文「规则」已按批 76 移出名单），
- *   但数据库生成的条目不筛：那些名字里常带「变量」「状态」，可它们是数据不是框架。
- * - 名字带托管前缀（`plot_assistant-`）的**一律排除** —— 那是本功能自己写进去的条目，
- *   再读一遍就与任务里 `{{标签}}` 的内容重复（2026-11-07 批 37 用户定）。
- * - `enabledEntries` 为空的按「全选」处理；非空时按「这本书的 uid 列表」筛。
+ * 批 104 用户定：名字带屏蔽词的条目从「一律排除」改成「默认不勾、可以自己重新勾」。
+ * 所以这里拆成两层：
+ * - includeEntry 只管「勾不动」的：托管前缀（plot_assistant-）仍一律排除 —— 那是本功能
+ *   自己写进去的条目，再读一遍就与任务里 {{标签}} 的内容重复（2026-11-07 批 37 用户定）。
+ * - isSelected 管「默认勾不勾」：缺键时普通条目全选、屏蔽词条目（含大纲表 / 纪要索引）
+ *   默认不勾；有勾选记录时只认这本书的 uid 列表，用户勾了屏蔽词条目它就进 $1/$9。
+ *   数据库生成条目仍恒进 $1（名字里常带「变量」「状态」，可它们是数据不是框架），$9 另行剔。
  *
- * agent 绿名单（`agentGreenlights`）属于第 7 期，没开 agent 时它本来就是空集，先不做。
+ * 面板与运行时共用同一份 worldbookEntries，判定函数也共用 isFrameworkEntry，
+ * 不会出现「面板上勾了、生成里却没有」。
+ * agent 绿名单（agentGreenlights）属于第 7 期，没开 agent 时它本来就是空集，先不做。
  */
 export function createPlotFilters(options: {
   enabledEntries?: Record<string, unknown> | null;
@@ -437,19 +440,22 @@ export function createPlotFilters(options: {
   isSelected: (entry: WorldbookHitEntry) => boolean;
 } {
   const enabledMap = options.enabledEntries;
-  const hasAnySelection = !!enabledMap && typeof enabledMap === 'object' && Object.keys(enabledMap).length > 0;
 
   return {
-    includeEntry: entry => !isFrameworkEntry(entry) && !isManagedWorldbookEntry(entry),
+    includeEntry: entry => !isManagedWorldbookEntry(entry),
     isSelected: entry => {
-      if (!hasAnySelection) return true;
-      if (isDatabaseGeneratedEntry(entry)) return true;
-      const list = (enabledMap as Record<string, unknown>)[entry.bookName];
-      if (typeof list === 'undefined') return true;
-      if (!Array.isArray(list)) return true;
+      const rawList = enabledMap && typeof enabledMap === 'object'
+        ? (enabledMap as Record<string, unknown>)[entry.bookName]
+        : undefined;
+      if (!Array.isArray(rawList)) {
+        // 缺键 / 这本书没有勾选记录 = 默认态：普通条目全选，屏蔽词条目默认不勾。
+        return !isFrameworkEntry(entry);
+      }
+      // 有勾选记录：数据库生成条目恒进 $1（$9 靠 excludeEntry 剔），其余只认名单。
       // uid 在酒馆助手里时而是数字时而是字符串，两边都 String() 再比，
-      // 否则会出现「界面上明明勾着，生成出来的 `$1` 里却没有它」。
-      return list.some(uid => String(uid) === String(entry.uid));
+      // 否则会出现「界面上明明勾着，生成出来的 $1 里却没有它」。
+      if (isDatabaseGeneratedEntry(entry)) return true;
+      return rawList.some(uid => String(uid) === String(entry.uid));
     },
   };
 }

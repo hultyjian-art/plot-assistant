@@ -221,11 +221,17 @@ function normalizeTaskApiName(primary: unknown, fallback: unknown): string {
  * 脏值一律丢弃（`'abc'`、`0`、`-3`、`manual: 1`、`manual: "true"`）而不是落成 0/NaN/半成品：
  * 周期是「每几楼进行一次」，落成 0 会让 `shouldRunTask` 每轮都判成到期，落成 NaN 会让它永远判成没到期；
  * 手动标记只认严格 `true`，是面板「只写 true、关闭=删键」那套落盘纪律的入口把关。
+ *
+ * 批104 第6条新增 `startAtUserFloor`（任务明确设的起始用户楼层）一个数字键，
+ * 沿用同一套 pick：脏值丢弃、缺省不落键。本轮序号不进预设 —— 它是每轮现算的判定入参，
+ * 由调用方直接传给 `selectTasksForFloor`（第127次取直，round.ts 的 PlotRoundDeps.userFloorIndex）。
  */
 function normalizeTaskSchedule(primary: unknown, fallback: unknown): TaskSchedule | null {
   const source = primary && typeof primary === 'object' ? (primary as Loose) : null;
   const backup = fallback && typeof fallback === 'object' ? (fallback as Loose) : null;
-  const pick = (key: 'everyRounds' | 'lastRound'): number | undefined => {
+  const pick = (
+    key: 'everyRounds' | 'lastRound' | 'startAtUserFloor',
+  ): number | undefined => {
     const raw = source && Object.prototype.hasOwnProperty.call(source, key) ? source[key] : backup?.[key];
     const value = Math.floor(Number(raw));
     if (!Number.isFinite(value) || value < 1) return undefined;
@@ -233,16 +239,23 @@ function normalizeTaskSchedule(primary: unknown, fallback: unknown): TaskSchedul
   };
   const everyRounds = pick('everyRounds');
   const lastRound = pick('lastRound');
+  // 起始用户楼层（批104 第6条）：和上面两个数字键同一家风，脏值一律丢弃、
+  // 源数据没写就不带这个键，保证旧预设逐字节形状不变。
+  const startAtUserFloor = pick('startAtUserFloor');
   // 手动触发标记（批68）：只认真写的 `true`，1 / "true" / false 这些脏值一律丢弃，
-  // 与上面两个数字字段同一家风；源数据没写就不带这个键，免得改掉旧预设的逐字节形状。
+  // 与上面数字字段同一家风；源数据没写就不带这个键，免得改掉旧预设的逐字节形状。
   const manualRaw =
     source && Object.prototype.hasOwnProperty.call(source, 'manual') ? source.manual : backup?.manual;
   const manual = manualRaw === true;
-  if (everyRounds === undefined && lastRound === undefined && !manual) return null;
+  if (
+    everyRounds === undefined && lastRound === undefined &&
+    startAtUserFloor === undefined && !manual
+  ) return null;
   return {
     ...(everyRounds === undefined ? {} : { everyRounds }),
     ...(lastRound === undefined ? {} : { lastRound }),
     ...(manual ? { manual: true } : {}),
+    ...(startAtUserFloor === undefined ? {} : { startAtUserFloor }),
   };
 }
 

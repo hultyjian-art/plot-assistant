@@ -54,6 +54,8 @@ export interface PlotApiLike {
   bodyParams?: string;
   /** 要从请求体里剔掉的参数名（逗号/顿号/空格分隔的原始文本）。 */
   excludeBodyParams?: string;
+  /** 关闭 API 工具调用：换算时把 tools / tool_choice 动态并进排除名单。 */
+  disableToolCalls?: boolean;
   /**
    * 附加请求标头（每行一个 `名字: 值` 的原始文本，由 `parseHeaderLines` 解析）。
    *
@@ -145,6 +147,15 @@ export function resolveCustomApi(api: PlotApiLike | null | undefined): CustomApi
   if (body.value !== null) payload.custom_include_body = body.value;
 
   const exclude = parseExcludeParams(api.excludeBodyParams ?? '');
+  // 「关闭 API 工具调用」不写进 excludeBodyParams 文本格：面板上「一键写入 DeepSeek 推荐参数」
+  // 会整格覆盖那两格，开关会被冲掉。这里在换算时动态合并，开关独立生效、也不重复。
+  // 只给 tool_choice:'none' 不给非空 tools 会被酒馆助手丢掉（generate/index.ts:360），
+  // 所以走「整个剔掉」而不是「设成 none」。
+  if (api.disableToolCalls === true) {
+    for (const name of ['tools', 'tool_choice']) {
+      if (!exclude.includes(name)) exclude.push(name);
+    }
+  }
   if (exclude.length > 0) payload.custom_exclude_body = exclude;
 
   const headers = parseHeaderLines(api.requestHeaders ?? '');

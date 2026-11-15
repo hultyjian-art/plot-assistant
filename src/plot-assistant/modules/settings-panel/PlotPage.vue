@@ -146,6 +146,31 @@ function commitPlot(): void {
   }
 }
 
+/**
+ * 任务「启用」这一格热加载：改完立刻写进 ctx.settings 与预设快照，
+ * 下一次点发送就按新开关跑，不必先点设置面板的「保存」。
+ *
+ * 刻意不写 klona(draft)：编辑器里其它还没保存的改动不能被这一下捎带出去。
+ * 也刻意不动 draft.presets —— 那样 isDirty 会误报；点「应用修改」时
+ * applyTaskDrafts 会用已被 v-model 改过的 editorTasks 写回同一个新值。
+ */
+function syncTaskEnabledHot(task: TaskDraft, enabled: boolean): void {
+  const activeName = String(props.ctx.settings.plot.presetName ?? '');
+  // 编辑器里翻的不是正在跑的那份预设时，不碰运行时设置。
+  if (activeName === '' || String(editorOrigin.value ?? '') !== activeName) return;
+  const plot = klona(props.ctx.settings.plot);
+  const stored = findStoredPreset(plot.presets, activeName);
+  const tasks = stored && Array.isArray(stored.data.plotTasks) ? stored.data.plotTasks : null;
+  if (!tasks) return;
+  const target = tasks.find((item: unknown): boolean => {
+    if (!item || typeof item !== 'object') return false;
+    return String((item as Record<string, unknown>).id ?? '') === String(task.id);
+  }) as Record<string, unknown> | undefined;
+  if (!target) return;
+  target.enabled = enabled;
+  if (saveSettings(props.ctx, { plot })) props.ctx.onSettingsSaved?.();
+}
+
 
 /**
  * 页签。`short` 是窄屏用的短名 —— 照工作流助手的 `acu-page-tab__short`：
@@ -481,9 +506,11 @@ function toggleWorldbook(name: string): void {
 interface WbEntryRow {
   uid: string;
   label: string;
-  /** 本来就不进 `$1`（框架条目名 / 大纲表 / 纪要索引） */
+  /** 默认不勾（框架条目名 / 大纲表 / 纪要索引），但用户可以自己重新勾上 */
   blocked: boolean;
-  /** 数据库脚本生成的条目（`$9` 整批剔掉的那一批） */
+  /** 一律排除、勾不动：本脚本自己写进世界书的条目（plot_assistant- 前缀） */
+  locked: boolean;
+  /** 数据库脚本生成的条目（$9 整批剔掉的那一批） */
   db: boolean;
 }
 
@@ -539,7 +566,10 @@ async function loadWorldbookEntries(): Promise<void> {
         return {
           uid: String(entry.uid ?? ''),
           label: name || `条目 ${String(entry.uid ?? '')}`,
-          blocked: isFrameworkEntry({ rawComment, normalizedComment }) || isManagedWorldbookEntry({ rawComment }),
+          // 屏蔽词条目「默认不勾、可重勾」与本脚本自写条目「一律排除」分开标，
+          // 否则会出现「面板让勾、运行时又不放行」的假开关。
+          blocked: isFrameworkEntry({ rawComment, normalizedComment }),
+          locked: isManagedWorldbookEntry({ rawComment }),
           db: isDatabaseGeneratedEntry({ normalizedComment }),
         };
       });
@@ -554,26 +584,35 @@ async function loadWorldbookEntries(): Promise<void> {
   }
 }
 
-/** 这本书的勾选清单；`null` = 缺键 = 全选。 */
+/** 这本书的勾选清单；null = 缺键 = 默认态（普通条目全选、屏蔽词条目不勾）。 */
 function entrySelection(book: string): string[] | null {
   const list = draft.worldbookEntries[book];
   return Array.isArray(list) ? list : null;
 }
 
-function isEntryOn(book: string, uid: string): boolean {
+function isEntryOn(book: string, row: WbEntryRow): boolean {
+  // 一律排除的那批永远不勾，也不让点；否则会出现「勾了却没进 $1」。
+  if (row.locked) return false;
   const list = entrySelection(book);
-  return list === null ? true : list.includes(uid);
+  // 缺键 = 默认态：普通条目全选，屏蔽词条目默认不勾。
+  if (list === null) return !row.blocked;
+  return list.includes(row.uid);
 }
 
 function setEntry(book: string, uid: string, on: boolean): void {
-  const all = (wbEntryRows.value[book] ?? []).map(row => row.uid);
-  const current = entrySelection(book) ?? all;
+  // 底稿只取「普通条目」：屏蔽词条目默认不勾，不能因为用户第一次取消某条
+  // 就把它们顺手写进白名单（否则升级后这十几类条目会静默进 $1/$9）。
+  const normal = (wbEntryRows.value[book] ?? [])
+    .filter(row => !row.blocked && !row.locked)
+    .map(row => row.uid);
+  const current = entrySelection(book) ?? normal;
   const next = current.filter(id => id !== uid);
   if (on) next.push(uid);
   const map: Record<string, string[]> = { ...draft.worldbookEntries };
-  // 全勾回去就把键删掉，回到「缺键 = 全选」—— 这样以后新加的条目自动生效，
-  // 否则用户会看到一个自己没动过的新条目莫名其妙不生效。
-  if (all.length > 0 && next.length === all.length) delete map[book];
+  // 集合相等才算「回到默认态」，不能只比长度：用户勾了一个屏蔽词条目、
+  // 又取消一个普通条目时长度也能凑巧相等，按长度判会把勾选悄悄抹掉。
+  const isDefault = next.length === normal.length && normal.every(id => next.includes(id));
+  if (isDefault) delete map[book];
   else map[book] = next;
   draft.worldbookEntries = map;
 }
@@ -590,6 +629,25 @@ function setAllEntries(book: string, on: boolean): void {
   draft.worldbookEntries = map;
 }
 
+/** 老设置里是否还存着「默认不勾」条目的编号（升级后会被当成已勾）。 */
+const hasLegacyBlockedSelection = computed<boolean>(() => {
+  for (const [book, list] of Object.entries(draft.worldbookEntries)) {
+    if (!Array.isArray(list)) continue;
+    const defaultOff = new Set(
+      (wbEntryRows.value[book] ?? [])
+        .filter(row => row.blocked || row.locked)
+        .map(row => row.uid),
+    );
+    if (list.some(uid => defaultOff.has(String(uid)))) return true;
+  }
+  return false;
+});
+
+/** 一键恢复到默认：清掉所有书的勾选记录，屏蔽词条目回到「默认不勾」。 */
+function restoreAllDefaults(): void {
+  draft.worldbookEntries = {};
+}
+
 function entryRowsOf(book: string): WbEntryRow[] {
   const rows = wbEntryRows.value[book] ?? [];
   const query = wbEntryQuery.value.trim().toLowerCase();
@@ -600,7 +658,9 @@ function entryRowsOf(book: string): WbEntryRow[] {
 function entryOnCount(book: string): number {
   const list = entrySelection(book);
   const rows = wbEntryRows.value[book] ?? [];
-  return list === null ? rows.length : rows.filter(row => list.includes(row.uid)).length;
+  return list === null
+    ? rows.filter(row => !row.blocked && !row.locked).length
+    : rows.filter(row => list.includes(row.uid)).length;
 }
 
 // ───────────────────────── 世界书写入（2026-11-07 批 36-38） ─────────────────────────
@@ -691,17 +751,34 @@ async function runWbCleanup(kind: 'current' | 'all'): Promise<void> {
 watch(
   () => draft.worldbookSource,
   (source) => {
-    if (source === 'manual' && wbBooks.value.length === 0) void loadWorldbooks();
-    // 换来源 = 换了一本书，旧条目清单不能继续挂着（会让人以为勾的是新书里的条目）
+    // 批 107：切换「跟随角色卡／手动选择」这一个动作，就自动把书单和条目都刷新掉，
+    // 不再单独摆「刷新书单」「读取条目」两个按钮让人自己点。
+    // 换来源 = 换了一本书，旧条目清单不能继续挂着（会让人以为勾的是新书里的条目）。
     wbEntryRows.value = {};
     if (source === 'character') readCharBooks();
+    void loadWorldbooks();
+    void loadWorldbookEntries();
   },
 );
 
 // 条目是异步读的（一本书几百条），所以等用户真翻到「上下文」页再读，
 // 面板一打开就把三本书全拉一遍会明显卡一下。
+// 批 107：手动模式下勾/取消一本书，等于换了一批要读的条目；条目按钮删掉后，
+// 这个 watch 是唯一的补读入口，否则新勾的书永远显示不出条目。
+watch(
+  () => draft.worldbookBooks,
+  () => {
+    if (draft.worldbookSource !== 'manual') return;
+    wbEntryRows.value = {};
+    void loadWorldbookEntries();
+  },
+);
+
 watch(page, (current) => {
   if (current !== 2) return;
+  // 上次读失败（或当时酒馆还没把书单准备好）时，翻回这一页就补读一次，
+  // 用户不必关掉面板重开才能重试。
+  if (wbBooks.value.length === 0 && !wbLoading.value) void loadWorldbooks();
   if (Object.keys(wbEntryRows.value).length > 0 || wbEntryLoading.value) return;
   void loadWorldbookEntries();
 });
@@ -730,6 +807,10 @@ watch(
 
 onMounted(() => {
   readCharBooks();
+  // 书单是「世界书（$1）」与「世界书写入」两格共用的：打开面板就读一次。
+  // 不能等用户切到「手动选择」才读 —— 设置里本来存的就是手动模式时，
+  // 下面两个 watch 不会触发，书单会一直空着，手动选书永远勾不到任何一本。
+  void loadWorldbooks();
   loadEditor();
 });
 
@@ -1043,6 +1124,7 @@ function addApi(): void {
     importedFrom: '',
     bodyParams: '',
     excludeBodyParams: '',
+    disableToolCalls: false,
     promptPostProcessing: 'follow',
   });
   apiNote.value = '';
@@ -1425,6 +1507,11 @@ function keyMask(key: string): string {
                 style="flex: 1 1 auto; min-width: 0"
               />
             </div>
+            <label class="acu-toggle acu-wb-entry-item" style="margin: 4px 0">
+              <input v-model="api.disableToolCalls" type="checkbox" />
+              <span class="acu-toggle__label">{{ UI.plot.apisDisableToolCalls }}</span>
+            </label>
+            <p class="acu-notes acu-notes--sm">{{ UI.plot.apisDisableToolCallsHint }}</p>
             <div class="acu-row">
               <label style="flex: 0 0 96px">{{ UI.plot.apisRequestHeaders }}</label>
             </div>
@@ -1511,9 +1598,6 @@ function keyMask(key: string): string {
             <input v-model="draft.worldbookSource" type="radio" value="manual" />
             <span class="acu-toggle__label">{{ UI.plot.worldbookManual }}</span>
           </label>
-          <button class="acu-btn acu-btn--sm" type="button" :disabled="wbLoading" @click="loadWorldbooks">
-            {{ wbLoading ? UI.plot.worldbookLoading : UI.plot.worldbookRefresh }}
-          </button>
         </div>
         <p v-if="wbError !== ''" class="acu-notes acu-notes--warn">{{ wbError }}</p>
 
@@ -1524,9 +1608,6 @@ function keyMask(key: string): string {
         <div class="acu-wb-entries">
           <div class="acu-row acu-row--inline">
             <span class="acu-toggle__label">{{ UI.plot.worldbookEntrySection }}</span>
-            <button class="acu-btn acu-btn--sm" type="button" :disabled="wbEntryLoading" @click="loadWorldbookEntries">
-              {{ wbEntryLoading ? UI.plot.worldbookEntryLoading : UI.plot.worldbookEntryLoad }}
-            </button>
             <input
               v-model="wbEntryQuery"
               class="acu-input"
@@ -1536,6 +1617,14 @@ function keyMask(key: string): string {
             />
           </div>
           <p class="acu-notes acu-notes--sm">{{ UI.plot.worldbookEntryHint }}</p>
+          <div v-if="hasLegacyBlockedSelection" class="acu-row acu-row--inline">
+            <p class="acu-notes acu-notes--warn" style="margin: 0; flex: 1 1 auto">
+              {{ UI.plot.worldbookEntryLegacyHint }}
+            </p>
+            <button class="acu-btn acu-btn--sm" type="button" @click="restoreAllDefaults">
+              {{ UI.plot.worldbookEntryRestore }}
+            </button>
+          </div>
           <p v-if="wbEntryError !== ''" class="acu-notes acu-notes--warn">{{ wbEntryError }}</p>
           <p v-else-if="wbShownBooks.length === 0" class="acu-notes acu-notes--warn">{{ UI.plot.worldbookEntryEmpty }}</p>
           <div v-else class="acu-wb-entry-box">
@@ -1547,30 +1636,31 @@ function keyMask(key: string): string {
                   {{ UI.plot.worldbookEntryCount(entryOnCount(book.name), (wbEntryRows[book.name] || []).length) }}
                 </span>
                 <button class="acu-btn acu-btn--sm" type="button" @click="setAllEntries(book.name, true)">
-                  {{ UI.plot.worldbookEntryAll }}
+                  {{ UI.plot.worldbookEntryRestore }}
                 </button>
                 <button class="acu-btn acu-btn--sm" type="button" @click="setAllEntries(book.name, false)">
                   {{ UI.plot.worldbookEntryNone }}
                 </button>
               </div>
-              <p v-if="entryRowsOf(book.name).length === 0" class="acu-notes acu-notes--sm">
+              <p v-if="entryRowsOf(book.name).length === 0 && !wbEntryLoading" class="acu-notes acu-notes--sm">
                 {{ UI.plot.worldbookEntryNoMatch }}
               </p>
               <label
                 v-for="row in entryRowsOf(book.name)"
                 :key="book.name + ':' + row.uid"
                 class="acu-toggle acu-wb-entry-item"
-                :class="{ 'acu-wb-entry-item--off': row.blocked }"
+                :class="{ 'acu-wb-entry-item--off': row.blocked || row.locked }"
               >
                 <input
                   type="checkbox"
-                  :checked="!row.blocked && isEntryOn(book.name, row.uid)"
-                  :disabled="row.blocked"
+                  :checked="isEntryOn(book.name, row)"
+                  :disabled="row.locked"
                   @change="onEntryToggle(book.name, row.uid, $event)"
                 />
                 <span class="acu-toggle__label">{{ row.label }}</span>
                 <span v-if="row.db" class="acu-wb-entry-tag">{{ UI.plot.worldbookEntryDbTag }}</span>
-                <span v-if="row.blocked" class="acu-wb-entry-tag">{{ UI.plot.worldbookEntryBlockedTag }}</span>
+                <span v-if="row.locked" class="acu-wb-entry-tag">{{ UI.plot.worldbookEntryLockedTag }}</span>
+                <span v-else-if="row.blocked" class="acu-wb-entry-tag">{{ UI.plot.worldbookEntryBlockedTag }}</span>
               </label>
             </div>
           </div>
@@ -1635,7 +1725,8 @@ function keyMask(key: string): string {
         <!-- 手动选书：与读侧那格同一个书架（wbBooks），搜索词分开，互不打扰 -->
         <template v-if="draft.worldbookWriteSource === 'manual'">
           <p class="acu-notes acu-notes--sm">{{ UI.plot.wbWritePickHint }}</p>
-          <p v-if="wbBooks.length === 0 && !wbLoading" class="acu-notes acu-notes--warn">{{ UI.plot.worldbookEmpty }}</p>
+          <p v-if="wbError !== ''" class="acu-notes acu-notes--warn">{{ wbError }}</p>
+          <p v-else-if="wbBooks.length === 0 && !wbLoading" class="acu-notes acu-notes--warn">{{ UI.plot.worldbookEmpty }}</p>
           <template v-else>
             <div class="acu-row">
               <input
@@ -1798,6 +1889,7 @@ function keyMask(key: string): string {
           :api-names="draft.apis.map((api) => api.name)"
           @copy-task="openCopyPaste('task', $event)"
           @copy-block="openCopyPaste('block', $event)"
+          @enabled-changed="syncTaskEnabledHot"
         />
         <p class="acu-notes acu-notes--sm">{{ UI.plot.presetEditIntro }}</p>
       </template>

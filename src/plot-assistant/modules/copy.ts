@@ -188,7 +188,10 @@ export const UI = {
     bubbleStopping: '正在终止…',
     disguiseLabel: '解除发送伪装',
     disguiseHint:
-      '默认关闭。开启后原文留在输入框等待剧情 AI 返回，不显示等待气泡或生成中外壳。此开关只改变等待外观：任务成功后由酒馆继续本次发送，最终失败或手动终止都不会把正文发出去。',
+      '默认关闭。进度气泡不管开关与否都显示。开启后原文一直留在输入框等待剧情 AI 返回，不会在聊天里插临时楼层；'
+      + '默认关闭时等待期间会先在聊天末尾显示一条临时用户楼层（只是外观，不进聊天记录、不占楼号），原文摆出来后输入框才收起来，'
+      + '任务完成就撤掉它、换成真正发出的楼层；失败或手动终止会撤掉临时楼层并把原文还回输入框。'
+      + '此开关只改变等待外观：任务成功后由酒馆继续本次发送，最终失败或手动终止都不会把正文发出去。',
 
     /** 总开关那一行 */
     enableLabel: '剧情推进总开关',
@@ -602,6 +605,12 @@ export const UI = {
     manualToastArmed: (name: string): string => `将在下一次用户输入时进行任务「${name}」`,
     manualToastDisarmed: (name: string): string => `已取消任务「${name}」的预约`,
     manualIdleReason: '等待手动触发',
+    zeroTaskCarriedTags: (count: number, reason: string): string =>
+      `这条楼层没有任务要跑，已落盘的 ${count} 个标签已按最终注入指令的占位符拼好并发送（${reason}）`,
+    beforeStartReason: '还没到起始用户楼层',
+    editorTaskStartAtUserFloor: '起始用户楼层',
+    editorTaskStartAtUserFloorHint:
+      '不填或填 1 = 从第 1 条用户楼层起就按触发周期跑；填 N = 新聊天里数到第 N 条用户楼层才允许触发。只数用户发的楼层（被隐藏的也算），AI 回复不算。没设或楼层序号拿不准时按第 1 条处理，不会误拦。手动触发开启的任务不受起始楼层限制。',
     previewNoTask: '这次发送没有任务要跑：可能全部停用、提示词块全关，或者都没到楼层间隔。',
     previewTaskMeta: (stage: number, count: number) => `阶段 ${stage} · ${count} 条消息`,
     // —— 世界书（`$1`）——
@@ -610,8 +619,6 @@ export const UI = {
       '这里决定任务提示词里的 $1 是哪几本书。默认跟随角色卡绑定的世界书；要拿没绑到角色卡上的全局设定书，就切成手动勾选。',
     worldbookFollow: '跟随角色卡',
     worldbookManual: '手动选择',
-    worldbookRefresh: '刷新书单',
-    worldbookLoading: '读取中…',
     worldbookEmpty: '没读到任何世界书。检查一下酒馆里是不是还没有世界书。',
     worldbookPickHint: '勾哪几本，$1 就只带哪几本的内容；一本都不勾等于没有 $1。',
     worldbookSearch: '搜书名…',
@@ -621,22 +628,25 @@ export const UI = {
     worldbookEntrySection: '条目',
     worldbookEntryHint:
       '这里列出上面那几本书里的条目，取消勾选的条目不会进 $1。只影响剧情推进读到的内容，不会改动世界书本身。',
-    worldbookEntryLoad: '读取条目',
-    worldbookEntryLoading: '读取中…',
     worldbookEntryEmpty: '这几本书里没有可勾选的条目。',
     worldbookEntryNoMatch: '没有名字含这几个字的条目。',
-    worldbookEntryAll: '全选',
+    worldbookEntryRestore: '恢复到默认',
     worldbookEntryNone: '全不选',
     worldbookEntryCount: (on: number, total: number) => `${on} / ${total} 条`,
     worldbookEntrySearch: '搜条目名…',
-    worldbookEntryBlockedTag: '自动排除',
+    worldbookEntryBlockedTag: '默认不勾',
+    worldbookEntryLockedTag: '一律排除',
     worldbookEntryDbTag: '数据库',
     worldbookEntryPrimaryTag: '主书',
     worldbookEntryAdditionalTag: '附加',
+    /** 老设置里被动存下的屏蔽词编号：升级后仍会被当成「已勾」，提示一下、不偷偷改。 */
+    worldbookEntryLegacyHint:
+      '旧设置里存过一批「默认不勾」的条目编号，升级后它们仍会被当成已勾选、悄悄进 $1。点一下「恢复到默认」清掉就好；不点也不影响别的条目。',
     worldbookEntryBlockedHint:
-      '名字里带这些词的条目会被自动排除：思维链、cot、MVU、mvu、变量、状态、Status、Rule、rule、检定、判断、叙事、文风、InitVar、格式。'
-    + '它们多半是给 MVU 变量框架和正则用的，AI 读了只会照着写代码；中文「规则」不在名单里，「王国规则总览」这类正经设定能正常进 $1，但英文 Rule / rule 仍会被排除。'
-    + '此外，大纲表与纪要索引有专用占位符、本脚本自己写进世界书的条目（plot_assistant- 开头）防止与任务里的 {{标签}} 重复，也都不进 $1，这里一并标出来。'
+      '名字里带这些词的条目默认不勾：思维链、cot、MVU、mvu、变量、状态、Status、Rule、rule、检定、判断、叙事、文风、InitVar、格式。'
+    + '它们多半是给 MVU 变量框架和正则用的，AI 读了只会照着写代码；现在可以自己重新勾上，勾了就会进 $1 和 $9。'
+    + '中文「规则」不在名单里，「王国规则总览」这类正经设定照常进 $1，但英文 Rule / rule 仍会默认不勾。'
+    + '大纲表与纪要索引有专用占位符、本脚本自己写进世界书的条目（plot_assistant- 开头）防止与任务里的 {{标签}} 重复，这两类一律排除、勾不动。'
     + '数据库脚本生成的条目会进 $1，但不会进 $9；给条目起名时避开上面那批词即可。',
     worldbookEntryReadError: (message: string) => `读条目失败：${message}`,
     // —— 世界书写入（把标签块写成条目；2026-11-07 批 36-38 用户定）——
@@ -680,6 +690,12 @@ export const UI = {
     apisBodyParamsHint: '每行一个「键: 值」，也可以贴 JSON。比如：\nthinking:\n  type: disabled',
     apisExcludeParams: '排除参数',
     apisExcludeParamsHint: '要从请求体里剔掉的参数名，用逗号或空格分隔，比如 top_p, reasoning_effort',
+    /** 关闭 API 工具调用：ACU 里同名开关是「上下文工具化」，本项目没有那套机制。 */
+    apisDisableToolCalls: '关闭 API 工具调用',
+    apisDisableToolCallsHint:
+      '部分渠道见到 tools 字段会直接报错，勾上后就把酒馆加进请求体的 tools / tool_choice 剔掉。'
+      + '只对「OpenAI 兼容 / custom」源生效（跟随酒馆时用不了）；拦不住宿主在更早一步塞进来的内容；'
+      + '用「剔掉」而不是把它设成 none，是因为只给 tool_choice 不给工具清单时会被酒馆助手丢掉。',
     apisRequestHeaders: '附加请求标头',
     apisRequestHeadersHint: '每行一个「名字: 值」，会追加到请求头上。没冒号的行会拦下来报错，不静默丢掉。',
     apisExtrasWarn: '两格都填着：这一格改请求体、上面那格改请求头，互不覆盖。同一个名字两边都写时，以对方怎么读为准。',
@@ -792,13 +808,15 @@ export const UI = {
       { name: '只进字段', desc: '写在这里的标签只存进数据、不写进最终注入正文——适合纯后台记录，不占正文 token。注意：它同样要完整回传，只是不进正文；少一个照样算任务失败。' },
       { name: '最短长度 / 重试上限', desc: '回传字数低于下限视为失败，按任务设置的重试上限重试；次数用尽仍失败则该任务判失败，这一轮不注入，原文退回输入框。' },
       { name: '每 N 楼（触发周期）', desc: '不填=每条用户楼层都跑；填 N=每隔 N 条用户楼层跑一次。只数用户发的楼层（被隐藏的也算），AI 回复不算。每个任务自己记锚点：任务成功跑完，就在那条用户楼层上单独打一个记号；下次发送时从最新楼层往回数，隔够 N 条才再跑。' },
+      { name: '起始用户楼层', desc: '不填 = 从第 1 条用户楼层起就按触发周期跑；填 N = 新聊天里数到第 N 条用户楼层才允许这个任务触发。只数用户发的楼层（被隐藏的也算），AI 回复不算。没到起始楼层的任务这一轮直接跳过，不占调用。手动触发开启的任务不受限制。' },
       { name: '手动触发', desc: '开启后任务不再按每 N 楼自动跑。聊天页面最新用户楼层的底部出现带任务名的按钮：点一下＝预约在下一次用户输入时执行（按钮发光，再点＝取消）；跑完自动回到待命。除非在任务里关掉手动触发并保存，任务一直保持手动才跑。停用任务不显示按钮，已预约的停用时预约清除。' },
       { name: '单独 API', desc: '这个任务可以指定走设置里哪一条 API（不填用「当前 API」）。适合把便宜模型留给轻任务、贵模型留给重任务。' },
       { name: '任务说明', desc: '纯备注，给自己看的，不进提示词。' },
     ],
     taskPoints: [
+      '设了起始用户楼层的任务，先数当前是第几条用户楼层，没到就跳过；设了触发周期的，到了起始楼层之后才按锚点间隔判定。',
       '怎么算隔了几楼：从最新一条用户楼层往回数，只看用户发的（被隐藏的也算），AI 回复跳过。每个任务只找自己的锚点，遇到就停；隔了 N 条或更多就跑，一条锚点都找不到就当第一次、一定跑。锚点写在楼层上，删层重刷时它跟着那条楼层一起消失，更早的锚点还在，所以连续重刷不会把本该隔开的任务挤到一起。',
-      '哪些任务会跑：启用的、（设了间隔的话）已隔够楼层的任务。全部任务都没到期时，这次发送不发生任何 AI 调用、也不留运行日志。',
+      '哪些任务会跑：启用的、已到起始用户楼层的、（设了间隔的话）已隔够楼层的任务。全部任务都没到期时，这次发送不发生任何 AI 调用、也不留运行日志。',
       '任务提示词里可以写占位符（$1…$9、{{标签}} 等，见「占位符」页），发送前替换；任务级还有自己的最终注入模板，决定它的产出怎么进正文。',
       '任务回传里只有 <标签名> 包住的段落会被抽取；标签差量（见下一页）决定这些回传怎么与上一轮合并。断点续跑按任务记账：每个任务抽到过哪些标签都留在账上，阶段 2 续跑时直接拿阶段 1 的产出，不用重跑。',
     ],

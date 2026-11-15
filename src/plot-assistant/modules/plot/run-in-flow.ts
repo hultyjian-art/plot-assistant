@@ -290,8 +290,16 @@ export async function appendPlotBlock(
 
   const lastAnchorGapOf = (taskId: string): number | null =>
     readAnchorGap(rawChat as AnchorFloor[], taskAnchorNames.get(taskId) ?? '');
+  // 起始用户楼层（批104 第6条）：只数现存楼层里的用户楼层，AI 回复不算；+1 是「即将发出的这一条」。
+  // 与 preview-flow.ts:110 的 round 同口径 —— 别拿绝对 message_id 混进来，那是给日志用的。
+  const userFloorIndex = (rawChat as unknown as AnchorFloor[]).filter(
+    (item) => item?.role === 'user',
+  ).length + 1;
   // 日志按绝对楼层号标识：roundIndex 字段沿用旧名，值取这一轮锚定的楼层号。
   const round = options.floor?.messageId ?? -1;
+
+  // 起始用户楼层：本轮序号直接作为判定入参递给 round.ts（第127次取直），
+  // 不再浅拷预设往任务 schedule 上挂运行时值。
 
   // ── 暂存：这一层之前有没有没跑完的账 ──
   //
@@ -303,6 +311,9 @@ export async function appendPlotBlock(
   const chatKey = chatKeyOf(ctx);
   let stash: Stash = store.loadStash(chatKey).stash;
   let working: StashWorking | null = null;
+  // 「重新开始」把进度清掉时，被清掉的那份里已经落盘的标签要留作续跑起点（批105）。
+  // 每轮现算、用完就扔，不写进账本也不写进设置。
+  let landedWorking: StashWorking | null = null;
   // qrf 模式不碰账本：成果直接写楼层字段，一楼一版，没有「续跑」这回事。
   // 反过来，升级模式也不写楼层字段 —— 两边各管一份，才不会出现"账本说 A、楼层说 B"。
   const useStash = plotSettings.stashMode !== 'qrf';
@@ -331,6 +342,12 @@ export async function appendPlotBlock(
       if (plan.stash !== stash) store.saveStash(plan.stash);
       stash = plan.stash;
       working = plan.working;
+      // 关掉没跑完的任务会让 planStashRun 走进「重新开始」分支：working 变 null，
+      // 但清空前那份已经过缺口核对的进度由 droppedWorking 带了出来。只拿它当标签快照，
+      // 不当作「要接着跑」的依据（那些任务仍会被停用 / 触发间隔筛掉）。
+      landedWorking = working === null && plan.droppedWorking && plan.droppedWorking.done.length > 0
+        ? plan.droppedWorking
+        : null;
     } catch (error) {
       // 账本读坏了不该让推进停摆：没有进度就从头跑，比整轮不跑好。
       console.warn('[剧情推进助手] 暂存对账失败，本轮按全新一轮处理', error);
@@ -453,7 +470,9 @@ export async function appendPlotBlock(
       worldbookContent: worldbook.content,
       worldbookDatabaseExcluded: worldbook.contentExcludingDatabase,
       gapOf: lastAnchorGapOf,
+      userFloorIndex,
       working,
+      landedWorking,
       // 引擎在发第一个请求之前会告诉我们「这一轮本来打算跑谁」——没有它就算不出还欠几个任务
       onRoundPlanned: (tasks: PlotTask[]) => {
         plannedIds = tasks.map((task) => task.id);
@@ -570,7 +589,20 @@ export async function appendPlotBlock(
 
     // 一个任务都没跑（全停用、这一轮都没到期、或者提示词块全关了）：
     // 原样放行，别往输入框后面拼一个空块。
+    // 例外（批105）：用户把没跑完的任务关掉时，上一轮已落盘的标签不该跟着丢 ——
+    // 引擎仍按最终注入指令里的 {{标签}} 把那些标签拼好了，这一轮就直接发这段注入正文。
+    // 判据是「真有标签被拼进去」，模板没写占位符或查不到内容时仍旧原样放行。
     if (outcome.ranTaskIds.length === 0) {
+      if (outcome.carriedTagNames.length > 0) {
+        return {
+          ok: true,
+          text: outcome.finalMessage,
+          note: UI.plot.zeroTaskCarriedTags(
+            outcome.carriedTagNames.length,
+            describeSkipped(outcome.skippedBySchedule, outcome.skippedNoPrompt.length),
+          ),
+        };
+      }
       return {
         ok: true,
         text: userText,
@@ -667,9 +699,11 @@ function chatKeyOf(ctx: RerushContext): string {
 function describeSkipped(skipped: { taskId: string; reason: string }[], emptyPromptCount: number): string {
   const parts: string[] = [];
   const notDue = skipped.filter((item) => item.reason === 'not_due').length;
+  const beforeStart = skipped.filter((item) => item.reason === 'before_start').length;
   const disabled = skipped.filter((item) => item.reason === 'disabled').length;
   const manualIdle = skipped.filter((item) => item.reason === 'manual_idle').length;
   if (notDue > 0) parts.push(`${notDue} 个还没到楼层间隔`);
+  if (beforeStart > 0) parts.push(`${beforeStart} 个任务${UI.plot.beforeStartReason}`);
   if (disabled > 0) parts.push(`${disabled} 个已停用`);
   if (manualIdle > 0) parts.push(`${manualIdle} 个任务${UI.plot.manualIdleReason}`);
   if (emptyPromptCount > 0) parts.push(`${emptyPromptCount} 个提示词块全关了`);

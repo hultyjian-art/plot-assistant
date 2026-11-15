@@ -23,6 +23,24 @@ export function consumeSendBypass(): boolean {
   return true;
 }
 
+/**
+ * 撤销一张还没用掉的通行证。
+ *
+ * 为什么需要：`actions.ts` 里「自己替用户点发送」先 `armSendBypass()` 再 `issueSend()`；
+ * 后者只有找到 `#send_but` 时才真产生一次 DOM click。按钮找不到时它走「接口」直调或
+ * 「落空」，这两种都不经过拦截器，那张通行证就永远留在模块里 —— 下一次**用户真实点击**
+ * 会被 `consumeSendBypass()` 当成自己人放行，推进整轮不跑，原文直接发出去（批 104 第 2 条
+ * 现象 a）。领了证没按按钮，必须当场还回去。
+ */
+export function cancelSendBypass(): void {
+  if (pending > 0) pending -= 1;
+}
+
+/** 诊断用：还有几张没用掉的通行证（只读，不改状态）。 */
+export function pendingSendBypass(): number {
+  return pending;
+}
+
 /** 卸载/重装时清空，避免上一条残留的通行证放走用户的真实点击。 */
 export function clearSendBypass(): void {
   pending = 0;

@@ -127,6 +127,14 @@ export interface PlotApiEntry {
   /** 要从请求体里剔掉的参数名（逗号/顿号/空格分隔）。 */
   excludeBodyParams: string;
   /**
+   * 关闭「API 工具调用」：true = 把酒馆宿主加进请求体的 tools / tool_choice 剔掉。
+   *
+   * 默认 false（不关）。只对 source === 'custom' 生效 —— 那两个键只在 custom 分支
+   * 被酒馆采纳。运行时在 plot/api-route.ts 动态并进排除名单，不写进上面那格文本：
+   * 面板上「一键写入 DeepSeek 推荐参数」会整格覆盖 excludeBodyParams，写进去会被冲掉。
+   */
+  disableToolCalls: boolean;
+  /**
    * 附加请求标头（每行一个 `Header: Value`，原文）。
    *
    * 与「附加请求体参数」成对：有些中转站要用自定义头验签，光靠密钥填不进去。
@@ -206,10 +214,11 @@ export interface PlotSettings {
    */
   requestTimeoutSeconds: number;
   /**
-   * 「解除发送伪装」：true = 等待剧情任务返回期间不显示气泡（只把原文留在输入框）。
+   * 「解除发送伪装」：true = 等待期间原文一直留在输入框、不把原文伪装成已发出的楼层。
    *
-   * 默认 false —— 与 ACU 的 `plotSendDisguiseDisabled` 同名同义、默认值也一致。
-   * 它**只改等待外观**：无论开关，任务失败或用户终止都不会把正文发出去。
+   * 默认 false —— 与 ACU 1.3.6 的 `plotSendDisguiseDisabled` 同名同义、默认值也一致。
+   * 它**只改等待外观**：两档都无条件显示进度气泡，任务成功由酒馆继续发送，
+   * 失败或手动终止都停发并把原文还回输入框。见 `plot/send-gate.ts`。
    */
   sendDisguiseDisabled: boolean;
   /** `$1` 用哪几本世界书：character = 角色卡绑定，manual = 下面勾选的那几本 */

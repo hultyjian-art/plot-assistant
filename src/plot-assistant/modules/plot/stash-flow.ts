@@ -95,6 +95,16 @@ export interface PlanStashRunResult {
   claim: StashClaimKind;
   /** 是不是「接着上次跑」 */
   resumed: boolean;
+  /**
+   * 这一轮被「重新开始」清掉、但里面已经落盘的那份进度（批105）。
+   *
+   * 用户把没跑完的任务关掉后，taskIds 里只剩已落盘的，allDone 成立，
+   * 旧实现会落到「重新开始」分支把 working 整个清掉 —— 已落盘的标签就跟着没了。
+   * 这里不改清空语义（working 照样是 null），只把清空前那份**已经过缺口核对**的
+   * 进度随结果带出去，由调用侧当作续跑起点的标签快照喂回 round.ts。
+   * 其它分支不给这个键（可选），调用侧按 null 处理。
+   */
+  droppedWorking?: StashWorking | null;
 }
 
 /** 重新开始一轮前清掉上一段输入的半成品进度；没有就不写盘。 */
@@ -186,6 +196,8 @@ export function planStashRun(input: PlanStashRunInput): PlanStashRunResult {
     return { stash: cleared.stash, entry: cleared.entry, working: null, claim: 'landed', resumed: false };
   }
 
+  // 只有「当前这一层有半成品进度、正文又对得上」这条分支才可能留下已落盘的标签。
+  let droppedWorking: StashWorking | null = null;
   if (claim.kind === 'pending' && claim.reason === 'text_match' && entry.working) {
     // 用户口径（2026-11-04）：已经落盘的任务不再重发；**只有这一轮的任务全都落盘了才整轮重发**。
     const planned = (input.taskIds ?? []).filter((id) => typeof id === 'string' && id);
@@ -208,6 +220,9 @@ export function planStashRun(input: PlanStashRunInput): PlanStashRunResult {
     if (!allDone || lost.length > 0) {
       return { stash, entry, working, claim: 'pending', resumed: true };
     }
+    // 全都落盘了（很可能是用户把没跑完的任务关掉了）：下面照旧清进度重新开始，
+    // 但这份已经把「标签被删的任务」挪回 pending 的进度要带出去，别让标签跟着丢。
+    droppedWorking = working;
   }
 
   if (claim.kind === 'pending' && claim.reason === 'text_differs' && entry.landings.length > 0) {
@@ -221,7 +236,7 @@ export function planStashRun(input: PlanStashRunInput): PlanStashRunResult {
   // 其余情况（正文一致但没进度 / 正文改了但还没有成果 / 楼层结构不对劲）都当重新开始。
   // 同上：旧 working 是上一段输入的半成品，不能让它污染这一轮。
   const cleared = clearEntryWorking(stash, entry);
-  return { stash: cleared.stash, entry: cleared.entry, working: null, claim: claim.kind, resumed: false };
+  return { stash: cleared.stash, entry: cleared.entry, working: null, claim: claim.kind, resumed: false, droppedWorking };
 }
 
 /**

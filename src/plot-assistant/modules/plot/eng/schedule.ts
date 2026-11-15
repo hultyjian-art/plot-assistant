@@ -20,6 +20,9 @@
  * 多跑一次只是多花 token，用户能看见。所以任何拿不准的输入都判 run: true。
  * 旧方案里「上次轮号比当前还大 → 判 due」的兜底，在锚点法里天然不成立（锚点只记存在、
  * 不记号码，gap 不会是负数）；等价的兜底是「找不到锚点 / 锚点数据读不懂 → first，一定跑」。
+ *
+ * 批104 第6条的「起始用户楼层」不是纪律的例外：只有当任务**明确设了**起始楼层 > 1、
+ * 且当前用户楼层序号是拿得准的有限正整数时，才允许判不跑；序号缺失/脏值一律忽略限制照跑。
  */
 
 /** 一个任务的触发周期设置。存在任务对象上，随预设一起走。 */
@@ -30,9 +33,11 @@ export interface TaskSchedule {
   lastRound?: number;
   /** 手动触发（批68）：只写 true，关闭=删键。标了它的任务只在这一楼层被预约时才跑。 */
   manual?: boolean;
+  /** 从第几条用户楼层起才允许触发（批104 第6条）；缺省 / 1 = 从第 1 条起，等价现状。 */
+  startAtUserFloor?: number;
 }
 
-export type ScheduleReason = 'always' | 'first' | 'due' | 'not_due' | 'disabled' | 'manual' | 'manual_idle';
+export type ScheduleReason = 'always' | 'first' | 'due' | 'not_due' | 'disabled' | 'manual' | 'manual_idle' | 'before_start';
 
 export interface ScheduleDecision {
   /** 这条楼层跑不跑 */
@@ -45,6 +50,10 @@ export interface ScheduleInput {
   /** 距上一次带本任务锚点的用户楼层隔了几条；null = 全表没有锚点（第一次跑） */
   gap: number | null;
   everyRounds?: number;
+  /** 任务明确设的起始用户楼层；缺省 / 1 = 从第 1 条起（等价现状）。 */
+  startAtUserFloor?: number;
+  /** 当前这条是第几条用户楼层（只数 `role === 'user'`）；缺失 / 脏值时起始限制不生效。 */
+  userFloorIndex?: number;
   enabled?: boolean;
   /** 任务 id：手动任务要拿它去预约集合里查；非手动任务用不到。 */
   id?: string;
@@ -52,11 +61,21 @@ export interface ScheduleInput {
   manual?: boolean;
 }
 
-/** 周期规整：缺省 / 脏值 / <1 一律回到 1（= 每条用户楼层都跑）。 */
-export function normalizeEveryRounds(value: unknown): number {
+/** 正整数规整：缺省 / 脏值 / <1 一律回到 1。 */
+function positiveIntOrOne(value: unknown): number {
   const n = Math.floor(Number(value));
   if (!Number.isFinite(n) || n < 1) return 1;
   return n;
+}
+
+/** 周期规整：缺省 / 脏值 / <1 一律回到 1（= 每条用户楼层都跑）。 */
+export function normalizeEveryRounds(value: unknown): number {
+  return positiveIntOrOne(value);
+}
+
+/** 起始用户楼层规整：缺省 / 脏值 / <1 一律回到 1（= 从第 1 条起，等价现状）。 */
+export function normalizeStartAtUserFloor(value: unknown): number {
+  return positiveIntOrOne(value);
 }
 
 /**
@@ -68,6 +87,9 @@ export function normalizeEveryRounds(value: unknown): number {
  * 手动任务（批68）单独走前两条：停用仍压过一切；传了预约名单才按名单判定，
  * 没传名单（重刷 / 回填）就当没这个标记，回到下面原有的周期判定。这样共用函数
  * 的默认值保持原行为，不会悄悄改掉其它入口。
+ *
+ * 起始用户楼层（批104 第6条）只在「明确设了参数 + 序号是有限正整数」时生效，
+ * 序号缺失 / 脏值 / 小数一律忽略限制照跑 —— 继续遵守「脏值往跑的方向倒」。
  */
 export function shouldRunTask(input: ScheduleInput, armedTaskIds?: ReadonlySet<string>): ScheduleDecision {
   // ① 停用最高优先，压过手动预约
@@ -79,6 +101,21 @@ export function shouldRunTask(input: ScheduleInput, armedTaskIds?: ReadonlySet<s
     return id !== undefined && armedTaskIds.has(id)
       ? { run: true, reason: 'manual' }
       : { run: false, reason: 'manual_idle' };
+  }
+
+  // ③ 起始用户楼层（批104 第6条）：放在手动预约之后、always / first 之前。
+  //    「明确设了」= 规整后仍 > 1；序号必须是拿得准的有限正整数，否则忽略限制照跑。
+  //    手动预约命中时已在 ② 直接返回，不受起始楼层限制（用户主动点的那一下不该被拦）。
+  const startAt = normalizeStartAtUserFloor(input?.startAtUserFloor);
+  const floorIndex = Number(input?.userFloorIndex);
+  if (
+    startAt > 1 &&
+    Number.isFinite(floorIndex) &&
+    Number.isInteger(floorIndex) &&
+    floorIndex >= 1 &&
+    floorIndex < startAt
+  ) {
+    return { run: false, reason: 'before_start' };
   }
 
   const every = normalizeEveryRounds(input?.everyRounds);
@@ -112,11 +149,15 @@ export interface FloorSelection<T extends ScheduledTaskLike> {
  * gapOf 由调用方提供：它负责从现存楼层里数出每个任务自己的间隔。
  * armedTaskIds 是这一楼层被手动预约的任务 id 集合；不传（重刷 / 回填）时手动标记不生效，
  * 所有任务按原有周期判定，行为与这个参数存在之前完全一致。
+ * userFloorIndex 是「起始用户楼层」判定用的绝对序号（只数用户楼层）；由调用方显式传，
+ * 不传 = 序号拿不准，起始限制不生效、按原周期判定。
  */
 export function selectTasksForFloor<T extends ScheduledTaskLike>(
   tasks: T[],
   gapOf: (taskId: string) => number | null,
   armedTaskIds?: ReadonlySet<string>,
+  /** 本轮是第几条用户楼层（第127次取直：只从调用方传入，不在任务对象上挂副本）。 */
+  userFloorIndex?: number,
 ): FloorSelection<T> {
   const list = Array.isArray(tasks) ? tasks.filter(task => task && typeof task.id === 'string' && task.id) : [];
   const due: T[] = [];
@@ -126,6 +167,8 @@ export function selectTasksForFloor<T extends ScheduledTaskLike>(
     const decision = shouldRunTask({
       gap: gapOf(task.id),
       everyRounds: task.schedule?.everyRounds,
+      startAtUserFloor: task.schedule?.startAtUserFloor,
+      userFloorIndex,
       enabled: task.enabled,
       id: task.id,
       manual: task.schedule?.manual === true,

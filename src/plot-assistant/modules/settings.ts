@@ -100,6 +100,8 @@ const PlotZ = z.object({
       bodyParams: z.string(),
       /** 要剔掉的请求体参数名，逗号/顿号/空格分隔。 */
       excludeBodyParams: z.string(),
+      /** 关闭 API 工具调用（剔掉宿主加的 tools / tool_choice）。默认 false，回落见 readPlotApi。 */
+      disableToolCalls: z.boolean(),
       requestHeaders: z.string(),
       /**
        * 提示词后处理（酒馆的 `custom_prompt_post_processing`）。
@@ -112,8 +114,8 @@ const PlotZ = z.object({
     }),
   ),
   /**
-   * 「解除发送伪装」：true = 等待期间不显示气泡/生成中外壳（只留输入框原文）。
-   * 默认 false（显示气泡），与 ACU 的 `plotSendDisguiseDisabled` 同名同义。
+   * 「解除发送伪装」：true = 等待期间原文留在输入框、不把原文伪装成已发出的楼层。
+   * 默认 false。两档都显示进度气泡，发送契约一致（对齐 ACU 1.3.6）。
    */
   sendDisguiseDisabled: z.boolean(),
   /**
@@ -353,7 +355,6 @@ function readCapture(source: unknown): CaptureSettings {
   return { fromAiFloor: asFlag(raw.fromAiFloor, FALLBACK_SETTINGS.capture.fromAiFloor) };
 }
 
-
 /**
  * 世界书条目勾选表：`书名 → 允许注入的 uid 列表`。
  *
@@ -547,9 +548,12 @@ function readPlotApi(raw: unknown): PlotApiEntry | null {
     maxTokens: readNumberOrLiteral(item.maxTokens, DEFAULT_MAX_TOKENS),
     temperature: readNumberOrLiteral(item.temperature, 1),
     importedFrom: typeof item.importedFrom === 'string' ? item.importedFrom : '',
-    // 老版本存下来的条目没有这两个字段：补空串，别让整份设置校验失败
+    // 老版本存下来的条目没有这几个字段：补空串，别让整份设置校验失败
     bodyParams: typeof item.bodyParams === 'string' ? item.bodyParams : '',
     excludeBodyParams: typeof item.excludeBodyParams === 'string' ? item.excludeBodyParams : '',
+    // 老版本没有「关闭 API 工具调用」这一格：默认不关，等于这个功能不存在。
+    // 这一句不能省 —— 少了它 SettingsZ.parse 会抛错，整份设置被重置成出厂默认。
+    disableToolCalls: item.disableToolCalls === true,
     requestHeaders: typeof item.requestHeaders === 'string' ? item.requestHeaders : '',
     // 老版本没有这一格：默认「跟随酒馆」—— 不借、不改，等于这个功能不存在
     promptPostProcessing: typeof item.promptPostProcessing === 'string' ? item.promptPostProcessing : 'follow',

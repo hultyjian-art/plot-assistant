@@ -39,6 +39,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   copyTask: [task: TaskDraft];
   copyBlock: [block: TaskBlockDraft];
+  enabledChanged: [task: TaskDraft, enabled: boolean];
 }>();
 
 const selectedIndex = ref(0);
@@ -141,10 +142,12 @@ function toggleManual(): void {
   if (!task.manual) clearArmedForTask(task);
 }
 
-/** 停用任务：预约立刻撤掉，按钮也会从楼层上消失。 */
+/** 停用任务：预约立刻撤掉，按钮也会从楼层上消失；这一格同时向上报一次做热加载。 */
 function toggleEnabled(task: TaskDraft, event: Event): void {
   const checked = (event.target as HTMLInputElement).checked;
   if (!checked) clearArmedForTask(task);
+  // 用事件里的值而不是 task.enabled：v-model 与 @change 的先后顺序不该影响这一下。
+  emit('enabledChanged', task, checked);
 }
 </script>
 
@@ -224,12 +227,13 @@ function toggleEnabled(task: TaskDraft, event: Event): void {
           <option v-for="name in props.apiNames ?? []" :key="name" :value="name">{{ name }}</option>
         </select>
       </div>
-      <p class="acu-notes acu-notes--sm">{{ UI.plot.editorTaskApiHint }}</p>
+      <p class="acu-notes acu-notes--sm"><strong>{{ UI.plot.editorTaskApi }}：</strong>{{ UI.plot.editorTaskApiHint }}</p>
 
       <!-- 小参数挤进一张网格：标签在上、输入框在下，比「一行一个标签」省一半高度。
            「顺序」不再给用户配：同一阶段本来就并发跑，顺序只由任务在列表里的位置决定。
-           两行各包一个两列子网格：第一行「阶段 / 每几楼」，第二行「重试次数 / 最少字数」。
-           手动触发隐藏「每几楼」时，阶段仍留在原来的位置，布局不塌。 -->
+           三行各包一个两列子网格：第一行「阶段 / 每几楼」，第二行「重试次数 / 最少字数」，
+           第三行「起始用户楼层」（单格占第一列）。手动触发隐藏「每几楼」与「起始用户楼层」时，
+           阶段、重试次数、最少字数仍留在原来的位置，布局不塌。 -->
       <div class="acu-field-grid">
         <div class="task-manual-field-row">
           <label class="acu-field">
@@ -251,8 +255,15 @@ function toggleEnabled(task: TaskDraft, event: Event): void {
             <input v-model.number="selectedTask.minLength" class="acu-input" type="number" min="0" />
           </label>
         </div>
+        <div class="task-manual-field-row">
+          <label v-if="!selectedTask.manual" class="acu-field">
+            <span class="acu-field__label">{{ UI.plot.editorTaskStartAtUserFloor }}</span>
+            <input v-model.number="selectedTask.startAtUserFloor" class="acu-input" type="number" min="1" />
+          </label>
+        </div>
       </div>
-      <p class="acu-notes acu-notes--sm">{{ UI.plot.editorTaskEveryHint }}</p>
+      <p class="acu-notes acu-notes--sm"><strong>{{ UI.plot.editorTaskEvery }}：</strong>{{ UI.plot.editorTaskEveryHint }}</p>
+      <p class="acu-notes acu-notes--sm"><strong>{{ UI.plot.editorTaskStartAtUserFloor }}：</strong>{{ UI.plot.editorTaskStartAtUserFloorHint }}</p>
 
       <div class="acu-row">
         <label class="rh-field-label">{{ UI.plot.editorTaskTags }}</label>
@@ -268,7 +279,7 @@ function toggleEnabled(task: TaskDraft, event: Event): void {
         <label class="rh-field-label">{{ UI.plot.editorTaskExempt }}</label>
         <input v-model="selectedTask.exemptTags" class="acu-input" type="text" placeholder="留空 = 全部必达" style="flex: 1 1 200px; min-width: 0" />
       </div>
-      <p class="acu-notes acu-notes--sm">{{ UI.plot.editorTaskExemptHint }}</p>
+      <p class="acu-notes acu-notes--sm"><strong>{{ UI.plot.editorTaskExempt }}：</strong>{{ UI.plot.editorTaskExemptHint }}</p>
 
       <!--
         这里原来还有两块：「这个任务的最终指令」和「说明」。
@@ -329,8 +340,15 @@ function toggleEnabled(task: TaskDraft, event: Event): void {
 </template>
 
 <style scoped>
-/* 任务的小参数：两行两列 —— 第一行「阶段 / 每几楼」，第二行「重试次数 / 最少字数」。
-   每行各包一个两列子网格，手动触发隐藏「每几楼」时另一个仍留在原位，布局不塌。 */
+/* 任务的小参数：三行两列 —— 第一行「阶段 / 每几楼」，第二行「重试次数 / 最少字数」，
+   第三行「起始用户楼层」单格占第一列（两列 grid 天然留白，不必改 grid-template-columns）。
+   每行各包一个两列子网格，手动触发隐藏两格时其它格仍留在原位，布局不塌。 */
+/* 批106：每段参数说明开头先标出「这是哪个参数」，免得几段长说明连成一片分不清 */
+.acu-notes--sm > strong {
+  color: var(--acu-text-1) !important;
+  font-weight: 600 !important;
+}
+
 .acu-field-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

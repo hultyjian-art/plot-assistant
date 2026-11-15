@@ -62,6 +62,59 @@
     'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', sans-serif;
   --rh-font-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'SFMono-Regular', Menlo, monospace;
 
+  /* ── 外界同名 --acu-* 的继承断点（批 104 第 5 条）───────────────────────────
+     CSS 自定义属性 --* 是**可继承**属性：祖先（酒馆主题 / 美化包 / 别处注入的
+     :root）只要声明了同名 --acu-*，整棵子树就跟着继承，组件里的 var(--acu-*)
+     会拿到外界的深色值。挂载点那条 `#rh-prefs-host { all: unset !important }`
+     挡不住 —— 按 CSS 规范 `all` 简写**不适用于自定义属性 --***，对继承来的
+     同名变量等于没设防。
+     与后面「文字方向」用 `.rh-mask, .rh-mask *` 钉死 writing-mode 是同一手法：
+     在根上就近声明，元素自身声明优先于继承值，祖先的污染值便渗不进来。
+     后代自身声明仍优先，所以 05-通用结构件.css 的 .rh-card 那 28 个保留不动、
+     也不加 !important，避免和 themes.ts 内联注入的主题令牌打架。
+     下面映射值逐字取自 05-通用结构件.css:16-45 与本文件上方 --rh-* 调色令牌，
+     不自编颜色；--rh-scheme 另补 light 兜底。 */
+  --acu-bg-0: var(--rh-bg);
+  --acu-bg-1: var(--rh-bg-pure);
+  --acu-bg-2: var(--rh-bg-soft);
+  --acu-bg-3: var(--rh-bg-hover);
+  --acu-border: var(--rh-line);
+  --acu-border-2: var(--rh-line-input);
+  --acu-text-1: var(--rh-fg);
+  --acu-text-2: var(--rh-fg-soft);
+  --acu-text-3: var(--rh-fg-dim);
+  --acu-accent: var(--rh-accent);
+  --acu-accent-2: var(--rh-accent-deep);
+  --acu-on-accent: #fefeff;
+  --acu-accent-glow: var(--rh-accent-ring);
+  --acu-success: var(--rh-ok);
+  --acu-warning: #b45309;
+  --acu-danger: var(--rh-danger);
+  --acu-hover-overlay: rgba(16, 18, 27, 0.06);
+  --acu-radius-lg: 12px;
+  --acu-radius-md: 10px;
+  --acu-radius-sm: 8px;
+  --acu-shadow: 0 12px 32px var(--rh-shadow);
+  --acu-font-ui: var(--rh-font);
+  --acu-font-mono: var(--rh-font-mono);
+  --acu-font-size-caption: 11px;
+  --acu-font-size-body: 12px;
+  --acu-font-size-body-lg: 13px;
+  --acu-font-size-panel-title: 14px;
+  --acu-line-height-body: 1.45;
+
+  /* 5 个在 05-通用结构件.css 里零声明、却会被消费的漏网变量（全 src grep 0 命中），
+     一并就近钉住；否则它们只能从祖先继承，污染值照样渗进来。 */
+  --acu-line: var(--rh-line);
+  --acu-accent-wash: var(--rh-accent-wash);
+  --acu-bg-pure: var(--rh-bg-pure);
+  --acu-accent-deep: var(--rh-accent-deep);
+  --acu-surface-2: var(--rh-bg-soft);
+
+  /* 主题明暗兜底：themes.ts 把 --rh-scheme 内联绑在 .rh-mask 上（内联优先，
+     不会被这条盖住）；万一主题没加载，也不让祖先的 dark 值渗进来。 */
+  --rh-scheme: light;
+
   /* —— 蒙层布局 —— */
   position: fixed !important;
   inset: 0 !important;
@@ -131,6 +184,23 @@
   font-variant: normal !important;
   font-style: normal !important;
   word-break: normal !important;
+}
+
+/*
+ * 文字方向：部分手机浏览器的「竖排阅读」、美化包或主题 CSS 会把 writing-mode
+ * 设成 vertical-*。它是**可继承**属性，顺着 html/body 渗进面板后，不只文字变成
+ * 一字一列，连 flex 的 row 主轴也会转成竖直方向 —— 卡头标题与「主题」下拉、
+ * 使用说明的顶部文字会挤成一团。上面 :where() 特异性为 0，压不住外界带
+ * !important 的规则，所以这里用 .rh-mask 与 .rh-mask * 把整棵子树钉回横排，
+ * 并一并复位配套的排版属性（面板自身没有任何竖排设计，钉死不会误伤）。
+ */
+.rh-mask,
+.rh-mask * {
+  writing-mode: horizontal-tb !important;
+  -webkit-writing-mode: horizontal-tb !important;
+  text-orientation: mixed !important;
+  text-combine-upright: none !important;
+  unicode-bidi: normal !important;
 }
 
 /* —— 控件兜底：酒馆对裸标签 input/select/textarea/button/code 有直接规则 —— */

@@ -17,7 +17,8 @@ import { buildResumePlan } from './eng/resume';
 import { performReplacements } from './eng/prompt-build';
 import { runPlotRound, type PlotRoundMessage, type PlotRoundOutcome, type SettledResult, type TaskLogInfo, type TaskProgressInfo } from './eng/engine';
 import { selectTasksForFloor, type ScheduleReason } from './eng/schedule';
-import { buildTagMap, type TagMap } from './eng/tags';
+import { buildTagMap, hasContent, lookupTag, type TagMap } from './eng/tags';
+import { collectDirectiveTagNames } from './eng/assemble';
 import { applyTagDiffs, collectKnownTagNames, tagsNeedingFullRefresh } from './eng/tag-diff';
 import type { PlotTask } from './eng/task-model';
 import type { PlotApiReply } from './eng/task-accept';
@@ -48,6 +49,13 @@ export interface PlotRoundDeps {
   /** 续跑用的暂存快照 */
   working?: StashWorking | null;
   /**
+   * 「重新开始」时被清掉、但里面已经有任务落盘的旧快照（批105）。
+   * 用户关掉没跑完的任务后，working 会是 null；这一份只用来把已完成任务的标签
+   * 带回续跑起点，不参与「谁要重跑」的判定（那些任务仍会被周期/停用筛掉）。
+   * 不传 = 与加这个参数之前完全一致。
+   */
+  landedWorking?: StashWorking | null;
+  /**
    * 每个任务距上一次带自己锚点的用户楼层隔了几条（见 `plot/floor-anchor.ts`）。
    * 返回 null = 现存楼层里找不到锚点，判为「第一次跑」。缺省时所有任务都按第一次处理。
    *
@@ -55,6 +63,11 @@ export interface PlotRoundDeps {
    * 删层重刷时锚点跟着楼层一起消失，换聊天自动各算各的。
    */
   gapOf?: (taskId: string) => number | null;
+  /**
+   * 本轮是第几条用户楼层（只数 role === 'user'）：「起始用户楼层」判定的绝对序号。
+   * 不传 = 序号拿不准，起始限制不生效、按原周期判定（eng/schedule.ts）。
+   */
+  userFloorIndex?: number;
   /**
    * 这一楼层被手动预约的任务 id 集合（见方案「任务手动触发」，批68）。
    * 只影响标了 schedule.manual 的任务：在集合里就跑、不在就跳过并报「等待手动触发」。
@@ -120,6 +133,11 @@ export type PlotRoundRunOutcome =
       skippedBySchedule: { taskId: string; reason: ScheduleReason }[];
       /** 提示词块全关掉、发不出任何内容的任务（这些不请求 AI）。 */
       skippedNoPrompt: string[];
+      /**
+       * 最终注入指令里真正被拼进去的、来自已落盘任务的标签名（批105）。
+       * 判据与 buildFinalMessage 同源；零任务轮靠它决定用注入正文还是原样放行。
+       */
+      carriedTagNames: string[];
     }
   | { ok: false; reason: 'no-preset' | 'unsupported-legacy-preset' | 'aborted-by-stage-failure'; presetName: string; outcome?: PlotRoundOutcome };
 
@@ -145,7 +163,9 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
   }
 
   // 续跑：把已完成的任务摘出去，并把它们的标签带回起点
-  const resume = buildResumePlan(config.tasks, deps.working ?? null);
+  // working 为 null 时，可能是「重新开始」把进度清掉了；这时若带了已落盘快照，
+  // 仍要按续跑口径把已完成任务的标签收进 relayTagMap（批105）。
+  const resume = buildResumePlan(config.tasks, deps.working ?? deps.landedWorking ?? null);
 
   // ── 触发间隔：这条用户楼层哪些任务到期 ──
   //
@@ -154,7 +174,7 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
   // 顺序反过来的话，一个「每 3 条用户楼层」的任务会被续跑先摘掉、被记成跑过 —— 它会越拖越久。
   //
   // 间隔由调用方从现存楼层里数好递进来（锚点在楼层 extra 里），这里只做纯策略判断。
-  const selection = selectTasksForFloor(resume.tasks, deps.gapOf ?? (() => null), deps.armedTaskIds);
+  const selection = selectTasksForFloor(resume.tasks, deps.gapOf ?? (() => null), deps.armedTaskIds, deps.userFloorIndex);
   const scheduledTasks = selection.due;
   const skippedBySchedule = selection.skipped.map(item => ({ taskId: item.id, reason: item.decision.reason }));
 
@@ -300,6 +320,15 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
   // 这里补一次，保证写进楼层的正文也拿到真实用户名/角色名。
   const finalMessage = deps.macroReplace ? deps.macroReplace(outcome.injectedMessage) : outcome.injectedMessage;
 
+  // 零任务轮也可能带着上一段已落盘的标签（用户把没跑完的任务关掉后点发送）。
+  // 判据必须和 buildFinalMessage 同源：拿引擎最终那张标签表，按最终注入指令里的
+  // {{标签}} 逐个查；模板没写、或查到的是空内容，都不算「拼进去了」——
+  // 否则会把一段只有指令、没有用户原文的正文发成用户楼层。
+  const carriedTagNames = collectDirectiveTagNames(directiveTemplate).filter(name => {
+    const resolved = lookupTag(outcome.aggregatedTags, name);
+    return hasContent(resolved.value);
+  });
+
   return {
     ok: true,
     presetName: config.name,
@@ -315,6 +344,7 @@ export async function runPlotRoundForPreset(deps: PlotRoundDeps): Promise<PlotRo
     ranTaskIds: outcome.taskResults.map(result => result.taskId),
     skippedBySchedule,
     skippedNoPrompt,
+    carriedTagNames,
   };
 }
 

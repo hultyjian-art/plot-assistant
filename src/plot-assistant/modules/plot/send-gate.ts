@@ -23,8 +23,12 @@
  *
  * ## 「解除发送伪装」
  *
- * 等待期间默认显示一条浮动气泡（原文留在输入框、不伪造 AI 楼层），气泡上有「终止」。
- * 打开「解除发送伪装」后不显示任何等待外观 —— 只是少个看得见的凭据，流程不变。
+ * 进度气泡**无条件显示**（用户 2026-11-15 批 104 第 3 条「不管开关与否都要显示气泡窗」）。
+ * 开关只改等待外观，严格对齐 ACU 1.3.6：默认「伪装开启」时先在聊天末尾插一条**临时用户楼层**
+ * （纯 UI 节点，不进 chat 数组、不占楼号）把原文摆出来，输入框才收起来 —— 否则等待期间
+ * 输入框凭空清空、聊天里又什么都没有，用户会以为没发送成功（2026-11-15 用户实测报障）。
+ * 打开「解除发送伪装」后不插临时楼层、原文一直留在输入框。两档发送契约完全一致：
+ * 任务成功由酒馆继续本次发送，最终失败或手动终止都停发、原文还回输入框（不另造真实用户楼层）。
  */
 
 import { TOAST_NOTICE_MS } from '../constants';
@@ -33,7 +37,7 @@ import { logInfo, logWarn } from '../logger';
 import { TAG, MSG, UI } from '../copy';
 import { appendPlotBlock } from './run-in-flow';
 import { completePlotSend } from './after-send';
-import { clearSendBypass, consumeSendBypass } from './send-bypass';
+import { clearSendBypass, consumeSendBypass, pendingSendBypass } from './send-bypass';
 import type { RerushContext } from '../types';
 
 /**
@@ -119,9 +123,10 @@ export function mountBubble(doc: Document, onStop: () => void): BubbleHandle {
 
   box.style.cssText = [
     'position:fixed',
-    'left:50%',
-    placeAtTop ? 'top:12px' : 'bottom:96px',
-    'transform:translateX(-50%)',
+    // 右上方偏低：不再水平居中（用户 2026-11-15 批 104 第 2 条）。用 right 而不是
+    // left + transform；拖动开始的 pointerdown 里会先清掉 right 再改 left/top。
+    placeAtTop ? 'right:12px' : 'right:16px',
+    placeAtTop ? 'top:64px' : 'top:96px',
     'z-index:2147483000',
     // 竖排：第一行文字+终止，第二行进度条。横排塞不下「阶段 1/2 · 记忆召回（1/3）」这么长的字。
     'display:flex',
@@ -205,6 +210,8 @@ export function mountBubble(doc: Document, onStop: () => void): BubbleHandle {
     grabX = event.clientX - rect.left;
     grabY = event.clientY - rect.top;
     box.style.transform = 'none';
+    // 默认位置靠 right 定位；改成拖动定位前必须清掉，否则 left+right 同时生效会把卡片拉宽。
+    box.style.right = 'auto';
     box.style.left = `${rect.left}px`;
     box.style.top = `${rect.top}px`;
     box.style.bottom = 'auto';
@@ -321,6 +328,124 @@ export function mountBubble(doc: Document, onStop: () => void): BubbleHandle {
   };
 }
 
+/** 等待期临时用户楼层的标记：纯 UI 节点，不进 chat 数组、不占楼号。 */
+const VIRTUAL_FLOOR_ATTR = 'data-rh-plot-virtual-floor';
+const VIRTUAL_FLOOR_STYLE_ID = 'rh-plot-virtual-floor-style';
+const VIRTUAL_FLOOR_STYLE = [
+  `.mes[${VIRTUAL_FLOOR_ATTR}] { pointer-events: none !important; }`,
+  `.mes[${VIRTUAL_FLOOR_ATTR}] .mes_buttons,`,
+  `.mes[${VIRTUAL_FLOOR_ATTR}] .mes_edit_buttons,`,
+  `.mes[${VIRTUAL_FLOOR_ATTR}] .for_checkbox,`,
+  `.mes[${VIRTUAL_FLOOR_ATTR}] .del_checkbox,`,
+  `.mes[${VIRTUAL_FLOOR_ATTR}] .swipe_left,`,
+  `.mes[${VIRTUAL_FLOOR_ATTR}] .swipe_right { display: none !important; }`,
+].join('\n');
+
+export interface PendingFloorHandle {
+  /** 撤掉临时楼层（幂等）；真楼层不受影响。 */
+  finish(): void;
+}
+
+/**
+ * 「发送伪装」的等待外观：在聊天末尾插一条临时用户楼层，里面放用户原文。
+ *
+ * 照 ACU 1.3.6 `beginPlotVirtualPendingFloor_ACU` 的语义，只做用户楼这一条（AI 楼的
+ * Thinking... 由进度气泡承担）：楼层克隆酒馆自己的 `#message_template .mes`，没有就
+ * 克隆最近一条真实用户楼，再没有才用最小兜底结构；因此名字、头像、气泡样式都跟酒馆一致。
+ * 节点不带 mesid，别的脚本按楼号查不到它；控件全部禁用，编辑/删除不会误伤真实楼层。
+ * 造不出来时返回 null，调用方退回「解除伪装」等待方式（原文留在输入框），绝不把文字吞掉。
+ */
+function mountPendingUserFloor(doc: Document, text: string, onLost: () => void): PendingFloorHandle | null {
+  const chat = doc.getElementById('chat');
+  if (!chat) return null;
+  let mes: HTMLElement | null = null;
+  let style: HTMLStyleElement | null = null;
+  let previousLast: HTMLElement | null = null;
+  let timer: number | undefined;
+  let finished = false;
+  const view = doc.defaultView;
+
+  const handle: PendingFloorHandle = {
+    finish(): void {
+      if (finished) return;
+      finished = true;
+      if (timer !== undefined) view?.clearInterval(timer);
+      mes?.remove();
+      style?.remove();
+      // 气泡模式靠 last_mes 贴底：临时楼层撤掉后把标记还给原来那层。
+      if (previousLast?.isConnected && !chat.querySelector('.mes.last_mes')) previousLast.classList.add('last_mes');
+    },
+  };
+
+  try {
+    const template = doc.querySelector<HTMLElement>('#message_template .mes');
+    const realFloors = chat.querySelectorAll<HTMLElement>(`.mes[is_user="true"]:not([${VIRTUAL_FLOOR_ATTR}])`);
+    const latestUser = realFloors.length > 0 ? realFloors[realFloors.length - 1] : null;
+    const source = template ?? latestUser;
+    if (source) {
+      mes = source.cloneNode(true) as HTMLElement;
+    } else {
+      const holder = doc.createElement('div');
+      holder.innerHTML = '<div class="mes" is_user="true"><div class="mesAvatarWrapper"><div class="avatar"><img src="" alt=""></div></div><div class="mes_block"><div class="ch_name"><span class="name_text"></span></div><div class="mes_text"></div></div></div>';
+      mes = holder.firstElementChild as HTMLElement;
+    }
+    mes.removeAttribute('mesid');
+    mes.removeAttribute('id');
+    mes.setAttribute(VIRTUAL_FLOOR_ATTR, 'true');
+    mes.setAttribute('is_user', 'true');
+    mes.setAttribute('is_system', 'false');
+
+    const name = latestUser?.getAttribute('ch_name') || latestUser?.querySelector('.name_text')?.textContent || '';
+    if (name) {
+      mes.setAttribute('ch_name', name);
+      const nameText = mes.querySelector<HTMLElement>('.name_text');
+      if (nameText) nameText.textContent = name;
+    }
+
+    // 正文用纯文本节点：按空行分段、单换行转 <br>，绝不把用户原文塞进 innerHTML。
+    const body = mes.querySelector<HTMLElement>('.mes_text');
+    if (!body) return null;
+    body.replaceChildren(...text.split(/\n{2,}/).map(block => {
+      const p = doc.createElement('p');
+      block.split('\n').forEach((line, i) => {
+        if (i) p.appendChild(doc.createElement('br'));
+        p.appendChild(doc.createTextNode(line));
+      });
+      return p;
+    }));
+    // 克隆来的模板可能带着上一楼的序号 / 计时 / token 数，清掉。
+    for (const sel of ['.mes_timer', '.tokenCounterDisplay', '.mesIDDisplay', '.timestamp']) {
+      const el = mes.querySelector<HTMLElement>(sel);
+      if (el) el.textContent = '';
+    }
+
+    style = doc.createElement('style');
+    style.id = VIRTUAL_FLOOR_STYLE_ID;
+    style.textContent = VIRTUAL_FLOOR_STYLE;
+    doc.head.appendChild(style);
+
+    previousLast = chat.querySelector<HTMLElement>('.mes.last_mes');
+    previousLast?.classList.remove('last_mes');
+    mes.classList.add('last_mes');
+    chat.appendChild(mes);
+    chat.scrollTop = chat.scrollHeight;
+
+    // 宿主重绘聊天会把临时楼层摘掉：自动撤掉外观，通知调用方把原文放回输入框。
+    if (view) {
+      timer = view.setInterval(() => {
+        if (mes && !mes.isConnected) {
+          handle.finish();
+          onLost();
+        }
+      }, 500);
+    }
+    return handle;
+  } catch (error) {
+    logWarn(TAG.plotGate, '临时用户楼层没造出来：这一轮退回「解除伪装」等待方式', error);
+    handle.finish();
+    return null;
+  }
+}
 function readInput(): string {
   const value = pageQuery()('#send_textarea').val();
   return typeof value === 'string' ? value : '';
@@ -355,12 +480,20 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
     return () => undefined;
   }
 
-  /** 我们自己按发送时置位，避免被自己的拦截器再拦一次。 */
-  let bypass = false;
+  /**
+   * 自己按的那一下：在 `#send_but` 上打一次性标记，拦截器读到才放行并立刻清掉。
+   * 不再用「布尔 + setTimeout(0) 时间窗口」——窗口外的第二次 click 会被当成新发送再跑一轮
+   * （批 104 第 2 条现象 b：气泡还在跑、用户楼层已生成）。标记绑定那一下点击，与时间无关。
+   */
+  const SELF_SEND_ATTR = 'data-rh-plot-self-send';
+  /** 诊断计数：本轮 `#send_but` 被点了几次，随前后两条日志一起落运行日志。 */
+  let sendClickCount = 0;
   /** 正在跑剧情推进。 */
   let running = false;
   let abort: AbortController | null = null;
   let bubble: BubbleHandle | null = null;
+  /** 等待期临时用户楼层（纯 UI）：默认「伪装开启」时挂，真楼层出现前撤掉。 */
+  let pendingFloor: PendingFloorHandle | null = null;
 
   const stopRun = (): void => {
     if (!abort) return;
@@ -383,10 +516,32 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
     abort = new AbortController();
 
     const plot = ctx.settings.plot;
-    const disguise = plot.sendDisguiseDisabled !== true;
-    if (disguise) bubble = mountBubble(doc, stopRun);
+    // 「解除发送伪装」只改等待外观（严格对齐 ACU 1.3.6）：
+    // 默认（伪装开启）等待期间先在聊天里插一条临时用户楼层显示原文，输入框才暂时收起来；
+    // 打开解除后不插临时楼层、原文一直留在输入框。两档都无条件显示进度气泡
+    //（用户 m00139 第 3 条），发送契约也一致。
+    const holdOriginal = plot.sendDisguiseDisabled !== true;
+    let heldText: string | null = null;
+    let delivered = false;
+
+    bubble = mountBubble(doc, stopRun);
 
     try {
+      if (holdOriginal) {
+        pendingFloor = mountPendingUserFloor(doc, text, () => {
+          // 宿主重绘把临时楼层摘掉了：按「解除伪装」方式继续，原文放回输入框。
+          if (heldText !== null && !delivered) {
+            logWarn(TAG.plotGate, '临时用户楼层被宿主重绘摘掉：原文已放回输入框，本轮按「解除伪装」方式继续');
+            writeInput(heldText);
+            heldText = null;
+          }
+        });
+        if (pendingFloor) {
+          heldText = text;
+          writeInput('');
+        }
+        // 造不出来就不清输入框：宁可让原文一直留在框里，也不能出现「凭空消失」。
+      }
       logInfo(TAG.plotGate, MSG.plotGateStart);
       // 锚点：这一条发出去后会占用的用户楼层号 = 真实最后一楼 + 1（不数页面气泡）。
       // 暂存账用它认领「同一条输入被跑了两版」的情况。
@@ -424,10 +579,26 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
         logInfo(TAG.plotGate, MSG.plotGateNoTask);
       }
 
+      // 真楼层马上要出现：先撤掉临时用户楼层，否则会看到「文字出现→消失→楼层出现」的三连闪。
+      pendingFloor?.finish();
+      pendingFloor = null;
       writeInput(result.text);
-      bypass = true;
+      delivered = true;
+
+      // 一次性标记绑在按钮上：只放行「这一下」，不再靠 setTimeout 的时间窗口。
+      const $send = pageQuery()('#send_but');
+      const btn = $send[0] ?? null;
+      if (btn) btn.setAttribute(SELF_SEND_ATTR, '1');
+      logInfo(
+        TAG.plotGate,
+        `替用户点发送（前）：按钮点击计数=${sendClickCount}，一次性标记=${btn ? '已打' : '没找到按钮'}，通行证余数=${pendingSendBypass()}`,
+      );
       try {
         clickSend();
+        logInfo(
+          TAG.plotGate,
+          `替用户点发送（后）：按钮点击计数=${sendClickCount}，一次性标记=${btn?.hasAttribute(SELF_SEND_ATTR) === true ? '还在' : '已消费'}，通行证余数=${pendingSendBypass()}`,
+        );
         // 楼层是酒馆随后建的：等它出现后补写触发锚点（升级模式也要写）。
         // 不 await，写失败只记一笔，不能让已经发出去的消息显示成失败。
         const commit = result.commit;
@@ -441,15 +612,23 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
             .catch((error) => logWarn(TAG.plotGate, '楼层收尾检查失败', error));
         }
       } finally {
-        // 下一次事件循环再撤：capture 监听到的点击是同步派发的
-        win?.setTimeout(() => {
-          bypass = false;
-        }, 0);
+        // 标记只能被「读到它的那一次点击」消费。若这轮压根没产生 click（按钮被移除 /
+        // 被别的脚本挡掉），兜底清掉，免得残留到下一次真人点击把他放行。
+        if (btn?.hasAttribute(SELF_SEND_ATTR)) {
+          btn.removeAttribute(SELF_SEND_ATTR);
+          logWarn(TAG.plotGate, '自己那一下没被点击监听器读到：一次性标记已兜底清除');
+        }
       }
     } catch (error) {
       logWarn(TAG.plotGate, MSG.plotGateCrashed, error);
       pageToastr()?.error(MSG.plotGateCrashed, UI.plot.bubbleTitle, { timeOut: TOAST_NOTICE_MS });
     } finally {
+      // 临时楼层是纯 UI 节点，无论哪一档结局都要撤掉，绝不留一条假用户楼在聊天里。
+      pendingFloor?.finish();
+      pendingFloor = null;
+      // 伪装开启时原文只是被代管，失败 / 手动终止 / 崩了都要还回输入框（对齐 ACU 1.3.6：
+      // 最终失败或手动终止均停止正文发送、原文留在输入框）。成功那档已写过最终注入指令。
+      if (heldText !== null && !delivered) writeInput(heldText);
       finishUi();
     }
   };
@@ -467,11 +646,22 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
   };
 
   const onClick = (event: Event): void => {
-    // 自己发的：本地标记（刚跑完点的那一下）或别的流程提前打的招呼
-    if (bypass || consumeSendBypass()) return;
     const target = event.target as Element | null;
-    if (!target || typeof target.closest !== 'function') return;
-    if (!target.closest('#send_but')) return;
+    const btn = target && typeof target.closest === 'function' ? target.closest('#send_but') : null;
+    if (btn) {
+      sendClickCount += 1;
+      // 自己发的那一下：一次性标记在按钮上，读到才放行、立刻消费；与时间窗口无关。
+      if (btn.hasAttribute(SELF_SEND_ATTR)) {
+        btn.removeAttribute(SELF_SEND_ATTR);
+        logInfo(TAG.plotGate, `放行自己按的那一下（第 ${sendClickCount} 次点击，标记已消费）`);
+        return;
+      }
+    }
+    if (!btn) return;
+    // 别的流程（全流程重刷）提前打的通行证：只在「确实是发送按钮的点击」时消费。
+    // 以前放在函数最前面，任何一次点击都会把通行证吃掉 —— 既可能让真人点击被误放行，
+    // 也可能让真正该放行的那一下被拦下再跑一轮。
+    if (consumeSendBypass()) return;
     if (!ctx.settings.plot.enabled) return;
 
     const text = readInput().trim();
@@ -507,13 +697,14 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
-    if (bypass || consumeSendBypass()) return;
     if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
     if (event.isComposing) return;
     if (!enterMeansSend()) return;
     const target = event.target as Element | null;
     if (!target || typeof target.closest !== 'function') return;
     if (!target.closest('#send_textarea')) return;
+    // 通行证只在「确实是一次 Enter 发送」时消费，任意按键不再吃掉它（见 onClick 说明）。
+    if (consumeSendBypass()) return;
     if (!ctx.settings.plot.enabled) return;
 
     const text = readInput().trim();
@@ -532,11 +723,18 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
     doc.removeEventListener('click', onClick, true);
     doc.removeEventListener('keydown', onKeyDown, true);
     abort?.abort();
+    pendingFloor?.finish();
+    pendingFloor = null;
     bubble?.close();
     bubble = null;
     running = false;
-    bypass = false;
     clearSendBypass();
+    // 卸载时把可能残留的一次性标记也抹掉，别让重装后的第一次真人点击被放行。
+    try {
+      doc.querySelector(`#send_but[${SELF_SEND_ATTR}]`)?.removeAttribute(SELF_SEND_ATTR);
+    } catch {
+      // 页面正在被拆，取不到就算了。
+    }
     ctx.state.locked = false;
   };
 }
