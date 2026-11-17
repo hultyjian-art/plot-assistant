@@ -142,6 +142,19 @@ export interface PlotApiEntry {
    */
   requestHeaders: string;
   /**
+   * 通过酒馆渠道发送。默认 true（现状：走酒馆助手 generateRaw）。
+   *
+   * false = 关掉酒馆渠道，用下面的直连协议自己发请求（移植自 ACU 1.3.6）。
+   * 只对 apiMode==='custom' 有意义；跟随酒馆时这一格不显示也不生效。
+   * 老条目没有这个字段：读的时候补 true，等于这个功能不存在、行为不变。
+   */
+  sendViaTavern: boolean;
+  /**
+   * 直连时用的接口协议（四值白名单，见 plot/data/direct-api.ts）。
+   * 跟随酒馆时忽略。老条目补 'openai_compat'。
+   */
+  directApiFormat: string;
+  /**
    * 提示词后处理（酒馆的 `custom_prompt_post_processing`）。
    *
    * `'follow'` = 跟随酒馆那一格、完全不动；`''` = 这一轮显式要求不处理；

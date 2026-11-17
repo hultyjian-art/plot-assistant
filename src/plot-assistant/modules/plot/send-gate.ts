@@ -674,54 +674,14 @@ export function mountPlotSendGate(ctx: RerushContext): () => void {
     intercept(event, text);
   };
 
-  /**
-   * 这次 Enter 到底算不算「发送」。
-   *
-   * 输入框里按 Enter 有两种语义：发送、换行，由酒馆的 `power_user.send_on_enter` 决定。
-   * 手机键盘上那颗写着「换行」的键，发出来的同样是 Enter。
-   *
-   * 以前不看这两件事就直接拦，结果手机端换行被吞（2026-11-02 用户实测：
-   * 要么直接自动发送、要么完全没反应，关掉总开关就正常）。所以只在
-   * 「不是触摸设备、且酒馆设成 Enter 发送」时才认它，其余一律放行给酒馆。
-   */
-  const enterMeansSend = (): boolean => {
-    const host = doc?.defaultView;
-    if (!host) return false;
-    try {
-      if (typeof host.matchMedia === 'function' && host.matchMedia('(pointer: coarse)').matches) return false;
-    } catch {
-      return false;
-    }
-    const powerUser = (host as unknown as { power_user?: { send_on_enter?: unknown } }).power_user;
-    return powerUser?.send_on_enter === true;
-  };
-
-  const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
-    if (event.isComposing) return;
-    if (!enterMeansSend()) return;
-    const target = event.target as Element | null;
-    if (!target || typeof target.closest !== 'function') return;
-    if (!target.closest('#send_textarea')) return;
-    // 通行证只在「确实是一次 Enter 发送」时消费，任意按键不再吃掉它（见 onClick 说明）。
-    if (consumeSendBypass()) return;
-    if (!ctx.settings.plot.enabled) return;
-
-    const text = readInput().trim();
-    if (text === '') return;
-    if (running) {
-      swallow(event);
-      return;
-    }
-    intercept(event, text);
-  };
-
+  // 只拦 #send_but 的 click，不单独拦输入框的 Enter（2026-11-16 第133次）。
+  // Enter 发送、Ctrl+Enter 发送、手机发送键最终都会点到 #send_but，按钮这一层拦得住；
+  // 手机软键盘的「换行」不会点到发送按钮，自然放行。不必猜 Enter 语义，也不读
+  // power_user.send_on_enter（该字段读不到时曾把 Enter 直接放行，导致电脑端 Enter 发送绕过剧情推进）。
   doc.addEventListener('click', onClick, true);
-  doc.addEventListener('keydown', onKeyDown, true);
 
   return () => {
     doc.removeEventListener('click', onClick, true);
-    doc.removeEventListener('keydown', onKeyDown, true);
     abort?.abort();
     pendingFloor?.finish();
     pendingFloor = null;

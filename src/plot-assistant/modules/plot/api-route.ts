@@ -25,6 +25,10 @@
  */
 
 import { parseBodyParams, parseExcludeParams } from './api-body';
+import { normalizeDirectApiFormat, type DirectApiConfig, type DirectApiFormat } from './data/direct-api';
+
+/** 直连配置里除了 messages 之外的部分（messages 由调用方按每次任务填）。 */
+export type DirectApiPlanPayload = Omit<DirectApiConfig, 'messages'>;
 
 /** 面板上一条 API 的最小形状（只要这里用得到的字段）。 */
 export interface PlotApiLike {
@@ -63,6 +67,10 @@ export interface PlotApiLike {
    * 那一行连同行号一起报出来，否则「填了没生效」查不到原因。
    */
   requestHeaders?: string;
+  /** 关掉酒馆渠道、自己直连（只对 custom 模式有意义）。老条目缺这个字段时按 true 处理。 */
+  sendViaTavern?: boolean;
+  /** 直连时用的四协议之一；老条目缺这个字段时按 openai_compat 处理。 */
+  directApiFormat?: string;
 }
 
 /** `generateRaw` 的 `custom_api` 参数（只声明我们用得到的那几个，其余不传）。 */
@@ -163,6 +171,47 @@ export function resolveCustomApi(api: PlotApiLike | null | undefined): CustomApi
   if (headers.value !== null) payload.custom_include_headers = headers.value;
 
   return { payload, problem: null };
+}
+
+/**
+ * 把一条 API 换算成「直连」配置。
+ *
+ * 只有明确关掉酒馆渠道（sendViaTavern === false）且是自定义地址时才返回 payload；
+ * 其余情况返回 null，调用方维持原来的 generateRaw 路径。
+ * 关了渠道却没填地址/模型：报 problem 让这一轮停下并说明原因，不静默退回酒馆 ——
+ * 静默回退会让用户以为直连生效了，实际却走的另一条路。
+ */
+export function resolveDirectApi(api: PlotApiLike | null | undefined): { payload: DirectApiPlanPayload | null; problem: string | null } {
+  if (!api || api.apiMode !== 'custom' || api.sendViaTavern !== false) return { payload: null, problem: null };
+
+  const url = api.url.trim();
+  const model = api.model.trim();
+  if (url === '' || model === '') {
+    return { payload: null, problem: `「${api.name}」关掉了酒馆渠道，但接口地址或模型为空，无法直连；请补全，或重新打开「通过酒馆渠道发送」。` };
+  }
+
+  const body = parseBodyParams(api.bodyParams ?? '');
+  if (!body.ok) return { payload: null, problem: `「${api.name}」的附加请求体参数有问题：${body.error}` };
+  const exclude = parseExcludeParams(api.excludeBodyParams ?? '');
+  const headers = parseHeaderLines(api.requestHeaders ?? '');
+  if (!headers.ok) return { payload: null, problem: `「${api.name}」的附加请求标头有问题：${headers.error}` };
+
+  const format: DirectApiFormat = normalizeDirectApiFormat(api.directApiFormat);
+  return {
+    payload: {
+      url,
+      apiKey: api.apiKey.trim(),
+      model,
+      format,
+      maxTokens: api.maxTokens,
+      temperature: api.temperature,
+      includeBody: body.value,
+      excludeBody: exclude,
+      headers: headers.value,
+      disableToolCalls: api.disableToolCalls === true,
+    },
+    problem: null,
+  };
 }
 
 /**

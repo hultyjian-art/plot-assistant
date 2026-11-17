@@ -57,9 +57,11 @@ const PresetZ = z.object({
   note: z.string(),
 });
 
+
 const CaptureZ = z.object({
   fromAiFloor: z.boolean(),
 });
+
 
 /** 剧情推进单次任务调用的默认超时（秒）。与 ACU 的 `API_REQUEST_TIMEOUT_DEFAULT_ACU` 一致。 */
 export const PLOT_DEFAULT_TIMEOUT_SECONDS = 300;
@@ -103,6 +105,10 @@ const PlotZ = z.object({
       /** 关闭 API 工具调用（剔掉宿主加的 tools / tool_choice）。默认 false，回落见 readPlotApi。 */
       disableToolCalls: z.boolean(),
       requestHeaders: z.string(),
+      /** 通过酒馆渠道发送；老条目补 true（默认走 generateRaw，行为不变）。 */
+      sendViaTavern: z.boolean(),
+      /** 直连接口协议（四值白名单，运行时归一）；老条目补 openai_compat。 */
+      directApiFormat: z.string(),
       /**
        * 提示词后处理（酒馆的 `custom_prompt_post_processing`）。
        *
@@ -555,6 +561,10 @@ function readPlotApi(raw: unknown): PlotApiEntry | null {
     // 这一句不能省 —— 少了它 SettingsZ.parse 会抛错，整份设置被重置成出厂默认。
     disableToolCalls: item.disableToolCalls === true,
     requestHeaders: typeof item.requestHeaders === 'string' ? item.requestHeaders : '',
+    // 老条目没有这两格：默认走酒馆渠道、协议 openai_compat —— 等于功能不存在、行为不变。
+    // 这两句不能省：少了它们 SettingsZ.parse 会抛错，整份设置被重置成出厂默认。
+    sendViaTavern: item.sendViaTavern !== false,
+    directApiFormat: typeof item.directApiFormat === 'string' ? item.directApiFormat : 'openai_compat',
     // 老版本没有这一格：默认「跟随酒馆」—— 不借、不改，等于这个功能不存在
     promptPostProcessing: typeof item.promptPostProcessing === 'string' ? item.promptPostProcessing : 'follow',
   };

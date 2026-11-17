@@ -10,7 +10,8 @@
 
 import { isPlainObject } from '../guards';
 import type { PlotRoundMessage } from '../eng/engine';
-import type { CustomApiPayload } from '../api-route';
+import type { CustomApiPayload, DirectApiPlanPayload } from '../api-route';
+import { sendDirectApi } from './direct-api';
 import { buildTimeoutError, normalizeTimeoutSeconds } from '../eng/call-outcome';
 import type { PlotApiReply } from '../eng/task-accept';
 import { tavernPostProcessing } from './post-processing-host';
@@ -37,6 +38,14 @@ export interface PlotApiCallOptions {
    * 传 `null` / 不传 = 跟随酒馆当前连接。
    */
   customApi?: CustomApiPayload | null;
+  /**
+   * 直连配置（关掉了「通过酒馆渠道发送」时由 run-in-flow 换算好传进来）。
+   * 非空时本函数走 fetch 直连、不再用 generateRaw；为空则维持酒馆渠道。
+   * 超时与用户终止同样生效（直连用 AbortController，见 callDirect）。
+   */
+  directApi?: DirectApiPlanPayload | null;
+  /** 测试注入用：替换直连发送函数。 */
+  directSend?: typeof sendDirectApi;
   /**
    * 超时秒数。`<= 0` = 不设超时。
    *
@@ -175,6 +184,65 @@ async function runWithTimeout(
 }
 
 /**
+ * 走直连通道发一次调用。
+ *
+ * 与酒馆渠道共用「用户终止 + 超时掐断」的口径：把 stopper 换成 AbortController 的 abort，
+ * 传进 fetch（direct-api.ts 的 sendDirectApi 收 signal）。generateRaw 那条靠 stopGenerationById，
+ * 直连这条没有酒馆的 id 可掐，只能靠 signal —— 两条路对上层抛出的错误类型一致。
+ */
+async function callDirect(
+  messages: PlotRoundMessage[],
+  config: DirectApiPlanPayload,
+  options: {
+    seconds: number | null;
+    signal?: AbortSignal;
+    send: typeof sendDirectApi;
+  },
+): Promise<RawGenerateResult> {
+  const { seconds, signal, send } = options;
+  // 用一个函数读 aborted，避免 TS 把第一次判断的结果跨 await 窄化（会误报后面的比较"不可能发生"）。
+  const aborted = (): boolean => signal?.aborted === true;
+  if (aborted()) throw buildAbortError();
+
+  const controller = new AbortController();
+  const stop = (): void => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+  const onAbort = (): void => stop();
+  signal?.addEventListener('abort', onAbort, { once: true });
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  if (seconds !== null && seconds > 0) {
+    timer = setTimeout(stop, seconds * 1000);
+  }
+
+  try {
+    const outcome = await send({
+      ...config,
+      messages: messages.map((message) => ({ role: message.role, content: message.content })),
+    }, controller.signal);
+    if (aborted()) throw buildAbortError();
+    // 归一成与 generateRaw 一致的对象，让下面的 content / tool_calls 解析逻辑原样复用。
+    return {
+      content: outcome.content,
+      ...(outcome.reasoning ? { reasoning: outcome.reasoning } : {}),
+      ...(outcome.toolCalls ? { tool_calls: outcome.toolCalls } : {}),
+    };
+  } catch (error) {
+    // 用户终止优先：abort 会让 fetch 抛 AbortError，但那不是「接口失败」，不能重试。
+    if (aborted()) throw buildAbortError();
+    if (controller.signal.aborted && timer !== null) {
+      // 计时器触发的 abort：转成与酒馆渠道同款的 TimeoutError
+      throw buildTimeoutError(seconds ?? 0, '剧情推进直连调用');
+    }
+    throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+/**
  * 发一次任务调用，拿回纯文本。
  *
  * 两个必须照 ACU 来的点：
@@ -191,6 +259,20 @@ async function runWithTimeout(
 export async function callPlotApi(messages: PlotRoundMessage[], options: PlotApiCallOptions = {}): Promise<PlotApiReply> {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error('剧情推进：这次任务没有任何提示词，拒绝发起调用');
+  }
+
+  // 关掉酒馆渠道时走直连：不依赖 generateRaw，自己发请求。
+  const directConfig = options.directApi;
+  if (directConfig) {
+    const secondsDirect = normalizeTimeoutSeconds(options.timeoutSeconds, 0);
+    const send = options.directSend || sendDirectApi;
+    const directResult = await callDirect(messages, directConfig, {
+      seconds: secondsDirect !== null && secondsDirect > 0 ? secondsDirect : null,
+      signal: options.signal,
+      send,
+    });
+    // 直连不走酒馆的后处理借用（提示词已按原样发出），下面统一解析返回值。
+    return readRawReply(directResult);
   }
 
   const raw = options.raw || resolveRawGenerator();
@@ -234,41 +316,7 @@ export async function callPlotApi(messages: PlotRoundMessage[], options: PlotApi
     borrow?.release();
   }
 
-  if (typeof result === 'string') return { text: result, reasoning: '' };
-  // ⚠️ 这里必须判「非空」：宿主开着工具调用/防截断时，正文被搬进 `tool_calls`，
-  // 回来的就是 `{ content: '', tool_calls: [...] }`。原版只判 `typeof content === 'string'`
-  // 就直接返回空串，于是任务永远被判「回复为空」，而渠道站那边明明每次都成功、回了上百字
-  // —— 2026-11-04 用户报的「记忆召回永远没有 AI 回传」就是这个形状。
-  if (result && typeof result === 'object' && typeof result.content === 'string' && result.content.trim() !== '') {
-    return { text: result.content, reasoning: readReasoning(result) };
-  }
-
-  // 正文可能不在 content 里，而在**工具调用的参数**里：
-  // 酒馆侧的「防截断」一类脚本会 hook fetch，给请求追加一个工具、把 AI 的正文塞进
-  // tool_calls[].function.arguments 再发回来。ACU 有 chatTurnFromJson 专门吃这种返回，
-  // 我们以前只认纯文本 —— 于是同一套提示词、同一个 API，ACU 能跑通，
-  // 我们报「任务回复长度不足」或「aborted-by-stage-failure」（2026-11-02 用户实测）。
-  if (result && typeof result === 'object' && !Array.isArray(result)) {
-    const carried = textFromToolCalls(result as Record<string, unknown>);
-    if (carried !== null && carried.trim() !== '') {
-      return { text: carried, reasoning: readReasoning(result as Record<string, unknown>) };
-    }
-  }
-
-  // 走到这里说明拿到的是个对象，但里面没有 content。
-  //
-  // 最常见的成因是酒馆那边开着「API 工具调用 / 函数调用」：正文被塞进 tool_calls 的
-  // 函数参数里发回来了，于是 `content` 是空的。只报「返回了非文本结果」等于什么都没说 ——
-  // 现场必须能看出「到底回来了什么」，所以把键名原样列出来，让人一眼认出是 tool_calls。
-  if (result === null || result === undefined) {
-    throw new Error('剧情推进：任务调用没有返回任何内容（null）。这条请求被宿主直接吞掉了，先看酒馆控制台有没有生成报错。');
-  }
-  const keys = result && typeof result === 'object' && !Array.isArray(result) ? Object.keys(result) : [];
-  const listed = keys.length > 0 ? keys.join(', ') : '（一个键都没有）';
-  throw new Error(
-    `剧情推进：任务调用返回的是对象，里面没有正文。拿到的键名：${listed}。` +
-      '如果列表里有 tool_calls 或 function_call，说明正文确实在工具调用里，但参数格式没认出来。',
-  );
+  return readRawReply(result);
 }
 
 /** 从返回对象里取推理正文：酒馆助手给 `reasoning`，部分渠道用 `reasoning_content`。 */
@@ -320,6 +368,42 @@ function pickCarriedText(args: unknown): string | null {
  * 调用里，只留最长的一段等于把别的标签丢掉 —— 而后面正是按标签对提取，缺一个就是
  * 缺一块成果。
  */
+
+/**
+ * 把一次调用拿回的原始结果归一成 `PlotApiReply`。
+ *
+ * 抽出来是为了让「酒馆渠道（generateRaw）」和「直连渠道（sendDirectApi）」共用同一套取值口径：
+ * 两条路拿回的东西形状可能不同（纯文本 / content / tool_calls），但下游只认这一种结构。
+ */
+function readRawReply(result: RawGenerateResult): PlotApiReply {
+  if (typeof result === 'string') return { text: result, reasoning: '' };
+  // ⚠️ 这里必须判「非空」：宿主开着工具调用/防截断时，正文被搬进 `tool_calls`，
+  // 回来的就是 `{ content: '', tool_calls: [...] }`。原版只判 `typeof content === 'string'`
+  // 就直接返回空串，于是任务永远被判「回复为空」，而渠道站那边明明每次都成功、回了上百字
+  // —— 2026-11-04 用户报的「记忆召回永远没有 AI 回传」就是这个形状。
+  if (result && typeof result === 'object' && typeof result.content === 'string' && result.content.trim() !== '') {
+    return { text: result.content, reasoning: readReasoning(result) };
+  }
+
+  // 正文可能不在 content 里，而在**工具调用的参数**里（酒馆「防截断」hook fetch 的形状）。
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    const carried = textFromToolCalls(result as Record<string, unknown>);
+    if (carried !== null && carried.trim() !== '') {
+      return { text: carried, reasoning: readReasoning(result as Record<string, unknown>) };
+    }
+  }
+
+  if (result === null || result === undefined) {
+    throw new Error('剧情推进：任务调用没有返回任何内容（null）。这条请求被宿主直接吞掉了，先看酒馆控制台有没有生成报错。');
+  }
+  const keys = result && typeof result === 'object' && !Array.isArray(result) ? Object.keys(result) : [];
+  const listed = keys.length > 0 ? keys.join(', ') : '（一个键都没有）';
+  throw new Error(
+    `剧情推进：任务调用返回的是对象，里面没有正文。拿到的键名：${listed}。` +
+      '如果列表里有 tool_calls 或 function_call，说明正文确实在工具调用里，但参数格式没认出来。',
+  );
+}
+
 function textFromToolCalls(result: Record<string, unknown>): string | null {
   const calls = result.tool_calls;
   if (!Array.isArray(calls)) {

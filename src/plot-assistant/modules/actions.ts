@@ -60,7 +60,6 @@ export async function runNativeRefresh(ctx: RerushContext): Promise<boolean> {
   if (hasDraft()) return refuse(MSG.blockedByNotEmptyBox);
   if (aiIsStreaming()) return refuse(MSG.blockedWhileGenerating);
 
-
   let triggered = false;
 
   try {
@@ -148,7 +147,7 @@ async function deleteFloorsToTail(ids: number[]): Promise<DeletePath> {
 /**
  * 替用户把输入框里的内容发出去，返回走了哪条路。
  * 一定要走"真实点击发送按钮"：卡片自带的数据库脚本在 #send_but 上以捕获阶段挂了
- * click / pointerup / touchend 钩子（输入框还有 Enter keydown 钩子），用它记下的
+ * click / pointerup / touchend 钩子，用它记下的
  * "用户发送意图"去判定剧情推进要不要触发；直调 context.sendTextareaMessage 不产生任何
  * DOM 事件，那道门控就会把这轮判成"用户消息直接写入聊天"而整段跳过。
  * 点击是同步派发，不依赖定时器，所以页面切到后台照样发得出去——要治的从来不是点击，是等待。

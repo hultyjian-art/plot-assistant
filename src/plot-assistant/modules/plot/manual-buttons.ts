@@ -5,6 +5,10 @@
  * 任务一个按钮。点亮＝把该任务的锚点名写进预约表，熄灭＝从预约表移除；按钮
  * 自己不碰聊天变量，一律走 plot/manual-arm.ts 的两个整表读写口。
  *
+ * 批 109 起：写表成功后排一个 3 秒的防误触定时器，到点由装配方注入的 onTrigger
+ * 立刻跑一轮，不再等用户下一次发消息。三秒内再点别的按钮只累加预约、不重置计时，
+ * 点回空表则到点什么都不跑。
+ *
  * 楼层号只从酒馆数据层取（getChatMessages + role），DOM 挂点按页面实际 mesid
  * 属性找；隐藏楼层没有气泡，从最新往前兜底找最近一条真渲染出来的用户楼层。
  * 找不到就不挂：不报错、不刷屏。跨 realm 一律按标签/属性判断，不做类型判断。
@@ -26,6 +30,8 @@ export interface ManualButtonDeps {
   listManualTasks(): ManualTaskView[];
   /** 总开关（运行中可能被设置面板改掉）；关着时只摘按钮、不动预约表。 */
   isEnabled?(): boolean;
+  /** 3 秒防误触到点后触发独立跑；预约表那时若已空，由按钮层自己拦掉。 */
+  onTrigger?(): void | Promise<void>;
 }
 
 /** 挂载后拿到的句柄：设置保存后调 refresh 立即重排，卸载时调 dispose。 */
@@ -49,6 +55,8 @@ const BAR_SELECTOR = '[data-rh-manual-bar]';
 const CSS_ID = 'rh-manual-buttons-css';
 const ARMED_CLASS = 'rh-manual-armed';
 const RENDER_DEBOUNCE_MS = 300;
+/** 批 109：点按钮后等这么久才正式开跑，留给用户一次反悔（再点一下取消）的机会。 */
+const TRIGGER_DELAY_MS = 3000;
 
 /**
  * 一次性注入样式，仿 modules/button.ts 的 ensureMotionCss：按 id 判重、挂 head、
@@ -146,8 +154,15 @@ function readSnapshot(deps: ManualButtonDeps): TaskSnapshot | null {
 /**
  * 点一下：读全表 → 该任务在表里就移除、不在就加入 → 整表写回 → 只更新这个按钮
  * 的发光状态。写表期间按钮 disabled 防重入；写回成功才提示，避免失败误报。
+ *
+ * 写表成功后排 3 秒触发（schedule）：取消也算一次点击，到点若预约表已空就不跑。
  */
-function handleClick(event: JQuery.Event, task: ManualTaskView, $button: JQuery<HTMLElement>): void {
+function handleClick(
+  event: JQuery.Event,
+  task: ManualTaskView,
+  $button: JQuery<HTMLElement>,
+  schedule: () => void,
+): void {
   event.stopPropagation();
   if ($button.prop('disabled') === true) return;
   $button.prop('disabled', true);
@@ -162,6 +177,7 @@ function handleClick(event: JQuery.Event, task: ManualTaskView, $button: JQuery<
     $button.toggleClass(ARMED_CLASS, !isArmed);
     if (isArmed) pageToastr().info(UI.plot.manualToastDisarmed(task.name));
     else pageToastr().success(UI.plot.manualToastArmed(task.name));
+    schedule();
   } catch (error) {
     console.error('[楼层按钮] 写预约表失败', error);
   } finally {
@@ -177,6 +193,7 @@ export function mountManualButtons(deps: ManualButtonDeps): ManualButtonsHandle 
 
   let disposed = false;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let triggerTimer: ReturnType<typeof setTimeout> | null = null;
   const observer = new MutationObserver(() => {
     scheduleRender();
   });
@@ -200,6 +217,34 @@ export function mountManualButtons(deps: ManualButtonDeps): ManualButtonsHandle 
       debounceTimer = null;
       render();
     }, RENDER_DEBOUNCE_MS);
+  }
+
+  /**
+   * 第一次点击起算 3 秒；期间再点别的按钮只累加预约，不重置计时（用户批 109：
+   * 「期间还同时点了其他按钮，仍然按阶段先后、同阶段并行」＝合成同一轮）。
+   * 到点再读一次预约表：用户三秒内点回空表就什么都不跑。
+   */
+  function scheduleTrigger(): void {
+    if (disposed || triggerTimer !== null) return;
+    triggerTimer = setTimeout(() => {
+      triggerTimer = null;
+      if (disposed) return;
+      let armed: string[];
+      try {
+        armed = readArmedTaskIds();
+      } catch (error) {
+        console.error('[楼层按钮] 触发前读预约表失败', error);
+        return;
+      }
+      if (armed.length === 0) return;
+      try {
+        void Promise.resolve(deps.onTrigger?.()).catch(error => {
+          console.error('[楼层按钮] 手动触发独立跑失败', error);
+        });
+      } catch (error) {
+        console.error('[楼层按钮] 手动触发独立跑失败', error);
+      }
+    }, TRIGGER_DELAY_MS);
   }
 
   function render(): void {
@@ -228,7 +273,7 @@ export function mountManualButtons(deps: ManualButtonDeps): ManualButtonsHandle 
           .toggleClass(ARMED_CLASS, armedSet.has(task.anchorName))
           .text(task.name);
         $button.on('click', event => {
-          handleClick(event, task, $button);
+          handleClick(event, task, $button, scheduleTrigger);
         });
         // 按钮按下不冒泡到楼层自身的手势（仿 plot/send-gate.ts:188）。
         $button.on('pointerdown mousedown touchstart', event => {
@@ -259,6 +304,8 @@ export function mountManualButtons(deps: ManualButtonDeps): ManualButtonsHandle 
     if (disposed) return;
     disposed = true;
     if (debounceTimer !== null) clearTimeout(debounceTimer);
+    if (triggerTimer !== null) clearTimeout(triggerTimer);
+    triggerTimer = null;
     observer.disconnect();
     for (const off of offs) {
       try {

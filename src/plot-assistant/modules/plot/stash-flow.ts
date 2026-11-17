@@ -14,6 +14,7 @@
 
 import type { PlotTaskResult } from './eng/assemble';
 import { collectTextTagMap, syncTextIntoTagRecords } from './stash-edit';
+import { landingInFloor } from './stash-apply';
 import {
   ENTRY_MAX,
   ORPHAN_MAX,
@@ -715,6 +716,83 @@ function newEntry(floorId: number, floorText: string, presetName: string, now: n
 }
 
 /** 写进一条账；顺手裁到上限（多的整条删，和文档一致：只留最近几层）。 */
+/**
+ * 批 109：手动触发独立跑的产物形状（不新开一版的落盘结果）。
+ */
+export interface MergeIntoActiveLandingInput {
+  stash: Stash;
+  floorId: number;
+  /** 楼层当前正文，用来认哪一版真的「正在使用」（§8.5 口径：不靠 activeLandingId）。 */
+  floorText: string;
+  finalText: string;
+  results: PlotTaskResult[];
+  now: number;
+}
+
+export interface MergeIntoActiveLandingResult {
+  ok: boolean;
+  reason: string;
+  stash: Stash;
+  landing: StashLanding | null;
+}
+
+/**
+ * 手动触发独立跑（批 109）：**不新开一版**，把这一轮成果原地盖回「正在使用」的那一版。
+ *
+ * 用户 2026-11-15 原话：「就挂到最新用户楼层正在使用的那一版中，不要新开一版」
+ * 「只挤掉当前正在使用的那一版中的对应标签」。所以这里只按本轮跑过的任务 id 覆盖
+ * taskTags，其它任务 id 的记录、carriedTags、seq、id 一律保留；finalText 换成新拼的
+ * 成品正文。绝不走 commitLanding / putLanding —— 那会新增一版并挤掉最旧的一版。
+ *
+ * 「正在使用」优先按楼层正文比对（landingInFloor），与面板 / §8.5 同一口径；
+ * 楼层正文被用户手动改过时退回 activeLandingId 那一版，并把 activeLandingId 同步过去，
+ * 免得对外小门 applyStashLandingFromExternal 的硬校验把世界书同步挡掉。
+ */
+export function mergeIntoActiveLanding(input: MergeIntoActiveLandingInput): MergeIntoActiveLandingResult {
+  const entry = getEntry(input.stash, input.floorId);
+  if (!entry) {
+    return { ok: false, reason: '这一层还没有暂存账', stash: input.stash, landing: null };
+  }
+  const inFloor = entry.landings.find(item => landingInFloor(input.floorText, item.finalText));
+  const byActive = entry.landings.find(item => item.id === entry.activeLandingId);
+  const landing = inFloor ?? byActive ?? null;
+  if (!landing) {
+    return { ok: false, reason: '这一层没有正在使用的那一版', stash: input.stash, landing: null };
+  }
+
+  const own = taskTagsOfLanding(landing);
+  const fresh = taskTagsFromResults(input.results);
+  const merged: Record<string, WorkingTaskTags> = {};
+  for (const [taskId, record] of Object.entries(own)) {
+    merged[taskId] = { tags: { ...(record.tags ?? {}) }, injectOnly: [...(record.injectOnly ?? [])] };
+  }
+  // 本轮跑过的任务整条记录换掉：这就是「只挤掉对应标签」，不动别的任务。
+  for (const [taskId, record] of Object.entries(fresh)) {
+    merged[taskId] = { tags: { ...(record.tags ?? {}) }, injectOnly: [...(record.injectOnly ?? [])] };
+  }
+
+  const updatedLanding: StashLanding = {
+    ...landing,
+    finalText: input.finalText,
+    taskTags: merged,
+    complete: true,
+  };
+  const landings = entry.landings.map(item => (item.id === landing.id ? updatedLanding : item));
+  const withActive = setActiveLanding({ ...entry, landings }, landing.id);
+  const updated: StashEntry = {
+    ...withActive,
+    working: null,
+    state: 'complete',
+    lastUsedAt: input.now,
+  };
+  return {
+    ok: true,
+    reason: '',
+    stash: upsertEntry(input.stash, updated),
+    landing: updatedLanding,
+  };
+}
+
 function upsertEntry(stash: Stash, entry: StashEntry): Stash {
   const others = stash.entries.filter((item) => item.floorId !== entry.floorId);
   const entries = [...others, entry].sort((a, b) => a.floorId - b.floorId).slice(-ENTRY_MAX);

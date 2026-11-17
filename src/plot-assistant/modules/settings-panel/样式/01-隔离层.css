@@ -191,11 +191,17 @@
  * 设成 vertical-*。它是**可继承**属性，顺着 html/body 渗进面板后，不只文字变成
  * 一字一列，连 flex 的 row 主轴也会转成竖直方向 —— 卡头标题与「主题」下拉、
  * 使用说明的顶部文字会挤成一团。上面 :where() 特异性为 0，压不住外界带
- * !important 的规则，所以这里用 .rh-mask 与 .rh-mask * 把整棵子树钉回横排，
- * 并一并复位配套的排版属性（面板自身没有任何竖排设计，钉死不会误伤）。
+ * !important 的规则，所以这里把整棵子树钉回横排，并一并复位配套的排版属性
+ * （面板自身没有任何竖排设计，钉死不会误伤）。
+ *
+ * 第134次强化：单类 .rh-mask * 的特异性只有 (0,1,0)，外界美化包若用「类组合」
+ * 或对标题写同为 !important 的竖排规则、又排在本文件之后，就会后写胜出穿透。
+ * 这里重复四次类名把特异性抬到 (0,4,0)，压住这类注入。已知边界：带 id 的
+ * 选择器特异性 (1,0,0) 仍高于任何纯类重复，那种极端注入 CSS 层面压不住，
+ * 只能靠 Shadow DOM 硬隔离（单独评估，本次不做）。
  */
-.rh-mask,
-.rh-mask * {
+.rh-mask.rh-mask.rh-mask.rh-mask,
+.rh-mask.rh-mask.rh-mask.rh-mask * {
   writing-mode: horizontal-tb !important;
   -webkit-writing-mode: horizontal-tb !important;
   text-orientation: mixed !important;

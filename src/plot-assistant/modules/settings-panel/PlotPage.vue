@@ -1439,6 +1439,33 @@ function keyMask(key: string): string {
           </div>
 
           <template v-if="api.apiMode === 'custom'">
+            <!-- 渠道选择：默认走酒馆（generateRaw）；关掉则由脚本按下面选的协议自己直连。
+                 对应数据库脚本的「通过酒馆渠道发送」开关。 -->
+            <label class="acu-toggle acu-wb-entry-item" style="margin: 4px 0">
+              <input v-model="api.sendViaTavern" type="checkbox" />
+              <span class="acu-toggle__label">{{ UI.plot.apisSendViaTavern }}</span>
+            </label>
+            <p class="acu-notes acu-notes--sm">{{ UI.plot.apisSendViaTavernHint }}</p>
+            <!-- 关闭 API 工具调用：与渠道开关同属「这条 API 怎么发」，挪到一起便于一起看。
+                 只对 custom 预设生效，运行时把 tools / tool_choice 并进排除参数。 -->
+            <label class="acu-toggle acu-wb-entry-item" style="margin: 4px 0">
+              <input v-model="api.disableToolCalls" type="checkbox" />
+              <span class="acu-toggle__label">{{ UI.plot.apisDisableToolCalls }}</span>
+            </label>
+            <p class="acu-notes acu-notes--sm">{{ UI.plot.apisDisableToolCallsHint }}</p>
+            <!-- 直连协议：只在关掉酒馆渠道时有意义，四值对齐数据库脚本的接口协议。 -->
+            <template v-if="!api.sendViaTavern">
+              <div class="acu-row">
+                <label style="flex: 0 0 96px">{{ UI.plot.apisDirectFormat }}</label>
+                <select v-model="api.directApiFormat" class="acu-select" style="flex: 1 1 auto; min-width: 0">
+                  <option value="openai_compat">{{ UI.plot.apisDirectFormatCompat }}</option>
+                  <option value="openai_responses">{{ UI.plot.apisDirectFormatResponses }}</option>
+                  <option value="claude_messages">{{ UI.plot.apisDirectFormatClaude }}</option>
+                  <option value="gemini_interactions">{{ UI.plot.apisDirectFormatGemini }}</option>
+                </select>
+              </div>
+              <p class="acu-notes acu-notes--sm">{{ UI.plot.apisDirectFormatHint }}</p>
+            </template>
             <div class="acu-row">
               <label style="flex: 0 0 72px">{{ UI.plot.apisUrl }}</label>
               <input v-model="api.url" class="acu-input" type="text" placeholder="https://..." style="flex: 1 1 auto; min-width: 0" />
@@ -1507,11 +1534,6 @@ function keyMask(key: string): string {
                 style="flex: 1 1 auto; min-width: 0"
               />
             </div>
-            <label class="acu-toggle acu-wb-entry-item" style="margin: 4px 0">
-              <input v-model="api.disableToolCalls" type="checkbox" />
-              <span class="acu-toggle__label">{{ UI.plot.apisDisableToolCalls }}</span>
-            </label>
-            <p class="acu-notes acu-notes--sm">{{ UI.plot.apisDisableToolCallsHint }}</p>
             <div class="acu-row">
               <label style="flex: 0 0 96px">{{ UI.plot.apisRequestHeaders }}</label>
             </div>

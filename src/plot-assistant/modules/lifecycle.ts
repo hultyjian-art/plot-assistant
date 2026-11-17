@@ -24,6 +24,7 @@ import {
 } from './plot/stash-external-api';
 import { setCachedActivatedEntries } from './plot/data/tavern-worldbook-scan';
 import { mountManualButtons, type ManualTaskView } from './plot/manual-buttons';
+import { runManualTriggeredRound } from './plot/manual-run';
 import { describePresetProblem, readPlotPreset } from './plot/data/acu-presets';
 import { findStoredPreset } from './plot/data/preset-store';
 import { importPresetConfig } from './plot/eng/preset-import';
@@ -71,12 +72,13 @@ export function bootstrap(ctx: RerushContext): void {
   // 剧情推进要在「用户点发送」这一刻插进去跑：手势重刷只是其中一条路，
   // 不开这层的话，正常点发送的正文会直接出去，开关等于装饰（2026-11-02 用户实测）。
   const detachPlotGate = mountPlotSendGate(ctx);
-  // 手动触发按钮：楼层底部一排开关，点亮后下一次发送才跑对应任务。
+  // 手动触发按钮（批 109）：楼层底部一排开关，点亮后等 3 秒就独立跑一轮，不再等用户发消息。
   // 不在这里按总开关决定挂不挂——用户可能进设置再打开；由 isEnabled 在每次渲染时判断，
   // 关闭时只把按钮条摘掉，不动预约表（预约归任务停用/删除时清理）。
   const manualButtons = mountManualButtons({
     listManualTasks: () => listManualTasks(ctx),
     isEnabled: () => ctx.settings.plot.enabled,
+    onTrigger: () => runManualTriggeredRound(ctx),
   });
   // 保存设置后立即重排手动按钮：任务从「自动」切到「手动」、或取消手动时，
   // 不需要等聊天事件或换角色卡才刷新（2026-11-11 用户实测反馈）。

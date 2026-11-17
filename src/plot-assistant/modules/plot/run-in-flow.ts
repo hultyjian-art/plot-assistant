@@ -11,7 +11,7 @@
  * 只有「没开」「没选预设」「预设读不出」这类「根本没开始跑」的情况才原样放行。
  */
 import type { RerushContext } from '../types';
-import { pickActiveApi, resolveCustomApi } from './api-route';
+import { pickActiveApi, resolveCustomApi, resolveDirectApi } from './api-route';
 import { isUserAbortError } from './eng/call-outcome';
 import { callPlotApi } from './data/ai-call';
 import { describePresetProblem, readPlotPreset } from './data/acu-presets';
@@ -33,7 +33,8 @@ import { runPlotRoundForPreset, type PlotRoundDeps } from './round';
 import { UI } from '../copy';
 import { readArmedTaskIds, setArmedTaskIds, pruneArmed, toArmedTaskIds } from './manual-arm';
 import { presetImportOptions } from './preset-options';
-import { commitLanding, commitProgress, planStashRun } from './stash-flow';
+import { commitLanding, commitProgress, mergeIntoActiveLanding, planStashRun } from './stash-flow';
+import { applyLandingToFloorMessage } from './stash-apply-io';
 import { collectStashTagMap, tagBlocksFromStash, taskTagRecordsOfLanding, type Stash, type StashWorking } from './stash-model';
 import { createLogWriter } from './log-flow';
 import { resolveChatStateStore } from './data/chat-vars';
@@ -205,6 +206,8 @@ function nextGenerationId(): string {
  * @param options.signal 终止信号：用户按「终止」时整轮立刻停，不再重试
  * @param options.join 结果怎么和原文拼：`append`=原文+空行+指令块（手势重刷的旧语义）；
  *   `final`=只要指令块（ACU 的语义：楼层正文就是最终注入指令，原话靠 `$8` 留在提示词里）
+ * @param options.independent 手动触发独立跑（批 109）：不新建楼层、不发送，把成果原地盖回
+ *   最新用户楼层「正在使用」的那一版并写回楼层正文；与发送拦截共用同一套任务选择/编排。
  */
 export async function appendPlotBlock(
   ctx: RerushContext,
@@ -217,6 +220,8 @@ export async function appendPlotBlock(
     onTaskStart?: (info: TaskProgressInfo) => void;
     /** 每个任务跑完回调一次（成功或失败都调；等待气泡用它把任务标成完成/失败） */
     onTaskSettled?: (result: PlotTaskResult) => void;
+    /** 手动触发独立跑：点按钮 3 秒后立刻跑，不靠用户发消息触发（批 109）。默认 false。 */
+    independent?: boolean;
   } = {},
 ): Promise<PlotAppendResult> {
   const plotSettings = ctx.settings.plot;
@@ -292,9 +297,10 @@ export async function appendPlotBlock(
     readAnchorGap(rawChat as AnchorFloor[], taskAnchorNames.get(taskId) ?? '');
   // 起始用户楼层（批104 第6条）：只数现存楼层里的用户楼层，AI 回复不算；+1 是「即将发出的这一条」。
   // 与 preview-flow.ts:110 的 round 同口径 —— 别拿绝对 message_id 混进来，那是给日志用的。
+  // 独立跑锚在已存在的最新用户楼层，不会「即将发出这一条」，所以不 +1。
   const userFloorIndex = (rawChat as unknown as AnchorFloor[]).filter(
     (item) => item?.role === 'user',
-  ).length + 1;
+  ).length + (options.independent ? 0 : 1);
   // 日志按绝对楼层号标识：roundIndex 字段沿用旧名，值取这一轮锚定的楼层号。
   const round = options.floor?.messageId ?? -1;
 
@@ -317,7 +323,8 @@ export async function appendPlotBlock(
   // qrf 模式不碰账本：成果直接写楼层字段，一楼一版，没有「续跑」这回事。
   // 反过来，升级模式也不写楼层字段 —— 两边各管一份，才不会出现"账本说 A、楼层说 B"。
   const useStash = plotSettings.stashMode !== 'qrf';
-  if (anchor && useStash) {
+  // 独立跑是「额外进行任务」，不是接着上次没跑完的账续跑，也不写进度账。
+  if (anchor && useStash && !options.independent) {
     try {
       const plan = planStashRun({
         stash,
@@ -359,7 +366,7 @@ export async function appendPlotBlock(
   let plannedIds: string[] = [];
   const settled: PlotTaskResult[] = [];
   const flushProgress = (): void => {
-    if (!useStash || !anchor || plannedIds.length === 0) return;
+    if (!useStash || !anchor || options.independent || plannedIds.length === 0) return;
     try {
       const next = commitProgress({
         stash,
@@ -407,11 +414,16 @@ export async function appendPlotBlock(
       hasTagRules,
     ),
   );
+  // collectStashTagMap 只认 floorId 更小的层。发送时 anchor 是「即将发出的新楼层 N+1」，
+  // 所以取到 N 层（最新用户楼层）的标签；独立跑 anchor 锚在已存在的 N 层，往后挪一层才同口径。
+  const historyFloorId = options.independent && anchor
+    ? anchor.messageId + 1
+    : (anchor?.messageId ?? Number.POSITIVE_INFINITY);
   const previousPlot = useStash
-    ? tagBlocksFromStash(stash, anchor?.messageId ?? Number.POSITIVE_INFINITY)
+    ? tagBlocksFromStash(stash, historyFloorId)
     : getPlotFromHistory(historyChat, {}, config.name);
   // `{{标签}}` 的主来源：暂存区账本里上一轮的标签投影（qrf 模式没有账本，退回上一楼层正文）。
-  const stashHistoryTags = useStash ? collectStashTagMap(stash, anchor?.messageId ?? Number.POSITIVE_INFINITY) : null;
+  const stashHistoryTags = useStash ? collectStashTagMap(stash, historyFloorId) : null;
   const recentText = (historyLimit === 0 ? [] : rawChat.slice(-historyLimit))
     .map((item) => String(item.message ?? ''))
     .join('\n');
@@ -530,12 +542,18 @@ export async function appendPlotBlock(
         const taskApi = wanted === '' ? activeApi : picked ?? activeApi;
         const taskPlan = taskApi === activeApi ? apiPlan : resolveCustomApi(taskApi);
         if (taskPlan.problem !== null) throw new Error(taskPlan.problem);
+        // 关掉「通过酒馆渠道发送」时换算成直连配置；直连与酒馆渠道二选一。
+        // 关了渠道却没填地址/模型，resolveDirectApi 会给 problem，明确拦下来而不是静默走回酒馆。
+        const directPlan = resolveDirectApi(taskApi);
+        if (directPlan.problem !== null) throw new Error(directPlan.problem);
         return callPlotApi(messages, {
-          customApi: taskPlan.payload,
+          // 直连时不再传 custom_api（那种请求根本不发往酒馆）；走酒馆时照旧。
+          customApi: directPlan.payload === null ? taskPlan.payload : null,
+          directApi: directPlan.payload,
           // 提示词后处理是每条 API 自己的选择：'follow'/空串 = 不动酒馆那一格。
-          // 它不能塞进 custom_api（酒馆助手白名单里没有这个键），所以由 callPlotApi 临时借用、用完还原。
+          // 直连路径用不上它（提示词原样发出），传着也无害，callPlotApi 在直连分支不会借用。
           promptPostProcessing: taskApi?.promptPostProcessing ?? '',
-          // 每次调用一个独立 id：超时靠它掐断（stopGenerationById 只认 id）
+          // 每次调用一个独立 id：超时靠它掐断（酒馆渠道按 id、直连按 AbortController）。
           generationId: nextGenerationId(),
           timeoutSeconds,
           // 用户点「终止」时把在飞的这条请求也掐掉，别让他干等到超时
@@ -617,7 +635,41 @@ export async function appendPlotBlock(
     // 写账失败不能拖累发送：账是辅助，消息才是用户要的。
     let commit: PlotCommit | undefined;
     let worldbookRecords: ReturnType<typeof taskTagRecordsOfLanding> | null = null;
-    if (anchor) {
+    if (anchor && options.independent) {
+      // 批 109：手动触发独立跑 —— 不新建楼层、不新开一版、不发送、不补锚点。
+      // 用户 2026-11-15 原话：「就挂到最新用户楼层正在使用的那一版中，不要新开一版」
+      // 「只挤掉当前正在使用的那一版中的对应标签」
+      // 「就自动拼到最新用户楼层里，并保存一次暂存区」。
+      if (useStash) {
+        try {
+          const merged = mergeIntoActiveLanding({
+            stash,
+            floorId: anchor.messageId,
+            floorText: anchor.floorText,
+            finalText: outcome.finalMessage,
+            results: settled,
+            now: Date.now(),
+          });
+          if (merged.ok && merged.landing) {
+            stash = merged.stash;
+            store.saveStash(stash);
+            // 世界书统一在末尾写；这里只把这一版完整的标签记录递下去。
+            worldbookRecords = taskTagRecordsOfLanding(merged.landing);
+          } else {
+            console.warn('[剧情推进助手] 手动触发独立跑：没找到可原地更新的版本', merged.reason);
+          }
+        } catch (error) {
+          console.warn('[剧情推进助手] 手动触发独立跑：原地更新暂存成果失败', error);
+        }
+      }
+      // 成品正文写回**已存在**的最新用户楼层：只换剧情块那一段，不删层、不发消息。
+      const applied = await applyLandingToFloorMessage(anchor.messageId, outcome.finalMessage);
+      if (!applied.ok) {
+        logWriter?.finish(`手动触发结果写不进楼层：${applied.reason}`);
+        return { ok: false, text: userText, note: `手动触发结果写不进楼层：${applied.reason}`, blocking: false };
+      }
+      // 独立跑不产 commit：completePlotSend / after-send / 每 N 楼锚点一律不参与。
+    } else if (anchor) {
       // qrf 模式不记两版成果：这一版直接进楼层字段（由 after-send 写），账本一个字不动。
       if (useStash) {
         try {
@@ -677,8 +729,9 @@ export async function appendPlotBlock(
     // 楼层正文写什么，由调用方决定：
     // - 手势重刷沿用「原文 + 空行 + 指令块」，用户回头还能看见自己说了什么；
     // - 发送拦截走 ACU 的语义，正文只放最终注入指令（原话由 $8 进了任务提示词，
-    //   再拼一遍反而会让主 AI 把同一段话读两遍）。
-    const text = options.join === 'final' ? outcome.finalMessage : `${userText}\n\n${outcome.finalMessage}`;
+    //   再拼一遍反而会让主 AI 把同一段话读两遍）；
+    // - 手动触发独立跑同样只要最终注入指令（它写回的是已存在楼层的剧情块，不是新消息）。
+    const text = options.independent || options.join === 'final' ? outcome.finalMessage : `${userText}\n\n${outcome.finalMessage}`;
     return { ok: true, text, note: outcome.presetName, commit };
   } catch (error) {
     // 不吞异常：先让用户看见，再把原文放行
